@@ -1,0 +1,1215 @@
+const express = require("express");
+const body_parser = require("body-parser");
+const axios = require("axios");
+require("dotenv").config();
+
+const app = express();
+app.use(body_parser.json());
+
+/* =========================
+   DB Configure
+========================= */
+const db = require("./config/db");
+
+async function dbQuery(sql, params = []) {
+    const [rows] = await db.execute(sql, params);
+    return rows;
+}
+
+/* =========================
+   ENV VARIABLES
+========================= */
+const TOKEN = process.env.TOKEN;
+const MYTOKEN = process.env.MYTOKEN;
+
+/* =========================
+   CONSTANTS
+========================= */
+const SHOP_NAME = "RamDev Baba Kirana";
+const DEFAULT_VENDOR_ID = 1;
+const SESSION_TIMEOUT_MS = 2 * 60 * 1000;
+
+/* =========================
+   STATES
+========================= */
+const STATES = {
+    IDLE: "idle",
+    PREORDER: "preorder",
+    AWAITING_MORE: "awaiting_more",
+    AWAITING_ADDRESS: "awaiting_address",
+    FINAL: "final",
+    COMPLETED: "completed"
+};
+
+/* =========================
+   SESSIONS
+========================= */
+const sessions = {};
+
+/* =========================
+   CATALOGS
+========================= */
+let productCatalog = [];
+let unitCatalog = [];
+const statusCache = {};
+
+/* =========================
+   UTILITIES
+========================= */
+function normalizeText(text) {
+    return (text || "")
+        .toString()
+        .toLowerCase()
+        .trim()
+        .replace(/[^\w\s]/g, " ")
+        .replace(/\s+/g, " ");
+}
+
+function splitAliases(text) {
+    if (!text) return [];
+    return String(text)
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
+}
+
+function buildSearchTokens(row) {
+    const tokens = [
+        row.product_name,
+        row.brand_name,
+        row.category_name,
+        row.package_size,
+        ...splitAliases(row.aliases)
+    ];
+
+    return [...new Set(tokens.map(normalizeText).filter(Boolean))];
+}
+
+function getDefaultUnitForType(unitType) {
+    const t = normalizeText(unitType);
+
+    if (t === "count") return "pcs";
+    if (t === "volume") return "ltr";
+    return "kg";
+}
+
+function isCountUnit(unit) {
+    if (!unit) return false;
+    const u = normalizeText(unit);
+    return ["pc", "pcs", "piece", "pieces", "nos", "no", "count", "pkt", "pack", "packets"].some(k => u.startsWith(k));
+}
+
+function isVolumeUnit(unit) {
+    if (!unit) return false;
+    const u = normalizeText(unit);
+    return ["l", "ltr", "litre", "liter", "ml"].some(k => u.startsWith(k));
+}
+
+function convertToKg(qty, unit) {
+    if (!unit) return qty;
+    const u = normalizeText(unit);
+
+    if (u.startsWith("kg") || u.startsWith("kilo")) return qty;
+    if (u.startsWith("g") || u.startsWith("gm") || u.startsWith("gram")) return qty / 1000;
+    if (u.startsWith("mg")) return qty / 1000000;
+    if (u.startsWith("lb") || u.startsWith("lbs") || u.startsWith("pound")) return qty * 0.453592;
+    if (u.startsWith("oz") || u.startsWith("ounce")) return qty * 0.0283495;
+    return qty;
+}
+
+function convertToLitre(qty, unit) {
+    if (!unit) return qty;
+    const u = normalizeText(unit);
+
+    if (u.startsWith("l") || u.startsWith("ltr") || u.startsWith("litre") || u.startsWith("liter")) return qty;
+    if (u.startsWith("ml")) return qty / 1000;
+    return qty;
+}
+
+function formatQty(qty) {
+    const n = Number(qty || 0);
+    if (Number.isInteger(n)) return String(n);
+    return n.toFixed(3).replace(/\.?0+$/, "");
+}
+
+function cleanOrderPart(part) {
+    return part
+        .replace(/^\s*(pls|please|kindly)\s+/i, "")
+        .replace(/\s+(pls|please|kindly|thanks|thank you|thx|ok|okay|done|pls order|please order|can|order)\s*\.?$/i, "")
+        .trim();
+}
+
+function isNoiseText(part) {
+    const t = normalizeText(part);
+    return [
+        "thanks", "thank you", "thx",
+        "pls", "please", "kindly",
+        "ok", "okay", "and", "done", "order",
+        "pls order", "please order", "can"
+    ].includes(t);
+}
+
+function extractQty(text) {
+    const normalized = normalizeText(text);
+    const match = normalized.match(/(\d+(?:\.\d+)?)/);
+    if (!match) return 1;
+    return Number(match[1]);
+}
+
+function extractUnit(text, unitType = "weight") {
+    const normalized = normalizeText(text);
+
+    if (isCountUnit(normalized)) return "pcs";
+    if (isVolumeUnit(normalized)) return normalized.includes("ml") ? "ml" : "ltr";
+
+    if (normalized.includes("kg")) return "kg";
+    if (normalized.includes("gm") || normalized.includes("g ")) return "gm";
+    if (normalized.includes("g")) return "g";
+    if (normalized.includes("ltr") || normalized.includes("liter") || normalized.includes("litre") || normalized.includes("l")) return "ltr";
+    if (normalized.includes("pc") || normalized.includes("pcs")) return "pcs";
+    if (normalized.includes("pkt") || normalized.includes("pack")) return "pkt";
+
+    return getDefaultUnitForType(unitType);
+}
+
+function resolveUnitId(unitText, unitType) {
+    const normalized = normalizeText(unitText || "");
+    const typeNorm = normalizeText(unitType || "");
+
+    if (!normalized && !typeNorm) return null;
+
+    const directMatch = unitCatalog.find(u =>
+        u.unit_name_norm === normalized ||
+        u.short_name_norm === normalized
+    );
+    if (directMatch) return directMatch.unit_id;
+
+    const typeMatch = unitCatalog.find(u =>
+        u.unit_type_norm === typeNorm &&
+        (
+            normalized === "" ||
+            u.unit_name_norm.includes(normalized) ||
+            normalized.includes(u.unit_name_norm) ||
+            u.short_name_norm.includes(normalized) ||
+            normalized.includes(u.short_name_norm)
+        )
+    );
+    if (typeMatch) return typeMatch.unit_id;
+
+    if (typeNorm === "count") {
+        const countMatch = unitCatalog.find(u =>
+            ["pcs", "pc", "no", "nos", "piece", "pieces", "count", "pkt", "pack"].includes(u.short_name_norm) ||
+            ["pcs", "pc", "no", "nos", "piece", "pieces", "count", "pkt", "pack"].includes(u.unit_name_norm)
+        );
+        if (countMatch) return countMatch.unit_id;
+    }
+
+    if (typeNorm === "volume") {
+        const volMatch = unitCatalog.find(u =>
+            ["ltr", "l", "ml", "liter", "litre"].includes(u.short_name_norm) ||
+            ["ltr", "l", "ml", "liter", "litre"].includes(u.unit_name_norm)
+        );
+        if (volMatch) return volMatch.unit_id;
+    }
+
+    if (typeNorm === "weight") {
+        const weightMatch = unitCatalog.find(u =>
+            ["kg", "g", "gm", "gms", "gram", "kilo"].includes(u.short_name_norm) ||
+            ["kg", "g", "gm", "gms", "gram", "kilo"].includes(u.unit_name_norm)
+        );
+        if (weightMatch) return weightMatch.unit_id;
+    }
+
+    return null;
+}
+
+async function getStatusIdByCode(code) {
+    if (statusCache[code] !== undefined) {
+        return statusCache[code];
+    }
+
+    const rows = await dbQuery(
+        `
+        SELECT status_id
+        FROM order_status
+        WHERE status_code = ? OR status_name = ?
+        LIMIT 1
+        `,
+        [code, code]
+    );
+
+    const statusId = rows.length > 0 ? rows[0].status_id : null;
+    statusCache[code] = statusId;
+    return statusId;
+}
+
+function findProduct(text) {
+    const normalized = normalizeText(text);
+
+    let bestMatch = null;
+    let bestScore = 0;
+
+    for (const p of productCatalog) {
+        let score = 0;
+
+        for (const token of p.searchTokens || []) {
+            if (!token) continue;
+
+            if (normalized === token) {
+                score = Math.max(score, 100);
+            } else if (normalized.includes(token) || token.includes(normalized)) {
+                score = Math.max(score, 70);
+            } else {
+                const inputWords = normalized.split(" ");
+                const tokenWords = token.split(" ");
+                const common = tokenWords.filter(w => inputWords.includes(w)).length;
+                score = Math.max(score, common * 10);
+            }
+        }
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestMatch = p;
+        }
+    }
+
+    return bestScore >= 20 ? bestMatch : null;
+}
+
+function parseOrderText(userText) {
+    const raw = (userText || "").trim();
+    const parts = raw.split(",").map(p => p.trim()).filter(Boolean);
+    const parsedItems = [];
+
+    for (const part of parts) {
+        let text = cleanOrderPart(part.replace("/", " ")).replace(/\s+/g, " ").trim();
+        if (!text || isNoiseText(text)) continue;
+
+        let rawName = "";
+        let rawQty = null;
+        let rawUnit = null;
+
+        const match = text.match(/^(.+?)\s+(\d+(?:\.\d+)?)(?:\s*([a-zA-Z\.]+))?$/i);
+        const match2 = text.match(/^(\d+(?:\.\d+)?)(?:\s*([a-zA-Z\.]+))?\s+(.+)$/i);
+
+        if (match) {
+            rawName = match[1].trim();
+            rawQty = parseFloat(match[2]);
+            rawUnit = match[3] ? match[3].toLowerCase() : null;
+        } else if (match2) {
+            rawQty = parseFloat(match2[1]);
+            rawUnit = match2[2] ? match2[2].toLowerCase() : null;
+            rawName = match2[3].trim();
+        } else {
+            rawName = text.trim();
+        }
+
+        if (!rawName) continue;
+
+        const product = findProduct(rawName);
+
+        if (!product) {
+            parsedItems.push({
+                product_id: null,
+                product_name: rawName,
+                qty: rawQty ?? 1,
+                unit: rawUnit || "",
+                unit_id: null,
+                unit_price: 0,
+                total: 0,
+                unit_type: "weight",
+                error: "Product not found"
+            });
+            continue;
+        }
+
+        if (rawQty == null) rawQty = 1;
+
+        const unitType = normalizeText(product.unit_type || "weight");
+        const baseUnit = rawUnit || getDefaultUnitForType(unitType);
+        const unitId = resolveUnitId(baseUnit, unitType);
+
+        if (unitType === "count" || isCountUnit(baseUnit)) {
+            const total = Number((Number(product.selling_price) * rawQty).toFixed(2));
+
+            parsedItems.push({
+                product_id: product.product_id,
+                product_name: product.product_name,
+                qty: Number(rawQty),
+                unit: baseUnit || "pcs",
+                unit_id: unitId,
+                unit_price: Number(product.selling_price),
+                total,
+                unit_type: "count"
+            });
+            continue;
+        }
+
+        if (unitType === "volume" || isVolumeUnit(baseUnit)) {
+            const qtyInLitre = convertToLitre(rawQty, baseUnit);
+            const total = Number((Number(product.selling_price) * qtyInLitre).toFixed(2));
+
+            parsedItems.push({
+                product_id: product.product_id,
+                product_name: product.product_name,
+                qty: Number(qtyInLitre.toFixed(3)),
+                unit: baseUnit || "ltr",
+                unit_id: unitId,
+                unit_price: Number(product.selling_price),
+                total,
+                unit_type: "volume"
+            });
+            continue;
+        }
+
+        const qtyInKg = convertToKg(rawQty, baseUnit);
+        const total = Number((Number(product.selling_price) * qtyInKg).toFixed(2));
+
+        parsedItems.push({
+            product_id: product.product_id,
+            product_name: product.product_name,
+            qty: Number(qtyInKg.toFixed(3)),
+            unit: baseUnit || "kg",
+            unit_id: unitId,
+            unit_price: Number(product.selling_price),
+            total,
+            unit_type: "weight",
+            qtyInKg: Number(qtyInKg.toFixed(3))
+        });
+    }
+
+    return parsedItems;
+}
+
+function buildTabularSummary(items, heading = "Pre Order Bill") {
+    const lines = [];
+    lines.push(`🧾 *${heading}*`);
+    lines.push("```");
+    lines.push("No  Product             Qty   Unit   Price");
+    lines.push("----------------------------------------------------");
+
+    let total = 0;
+
+    (items || []).forEach((it, i) => {
+        if (!it || it.error) return;
+
+        const name = String(it.product_name || "").padEnd(20).slice(0, 20);
+        const qty = String(it.qty ?? "").padEnd(5);
+        const unit = String(it.unit || "").padEnd(6);
+        const price = Number(it.total || 0).toFixed(2);
+
+        lines.push(`${String(i + 1).padEnd(3)} ${name} ${qty} ${unit} ${price}`);
+        total += Number(it.total || 0);
+    });
+
+    lines.push("---------------------------------------------------");
+    lines.push(`Total: ₹ ${total.toFixed(2)}`);
+    lines.push("```");
+
+    return {
+        text: lines.join("\n"),
+        grandTotal: total
+    };
+}
+
+function addToCart(session, items) {
+    if (!session.cart) session.cart = [];
+
+    for (const it of items) {
+        if (!it.error) {
+            session.cart.push(Object.assign({ cartId: session.cart.length + 1 }, it));
+        }
+    }
+
+    session.cart.forEach((c, i) => c.cartId = i + 1);
+}
+
+function viewCartSummary(session) {
+    const items = session.cart || [];
+    if (items.length === 0) return "🛒 Your cart is empty.";
+    return buildTabularSummary(items, "Your Cart").text;
+}
+
+function editCartItem(session, itemNo, newQty, newUnit) {
+    const idx = (session.cart || []).findIndex(c => c.cartId === itemNo);
+    if (idx === -1) return { error: "Item number not found in cart." };
+
+    const item = session.cart[idx];
+
+    if (newQty != null) item.qty = Number(newQty);
+    if (newUnit) item.unit = newUnit;
+
+    if (item.unit_type === "weight") {
+        const qtyInKg = convertToKg(item.qty, item.unit || "kg");
+        item.qtyInKg = Number(qtyInKg.toFixed(3));
+        item.total = Number(((item.unit_price || 0) * qtyInKg).toFixed(2));
+    } else if (item.unit_type === "volume") {
+        const qtyInL = convertToLitre(item.qty, item.unit || "ltr");
+        item.qty = Number(qtyInL.toFixed(3));
+        item.total = Number(((item.unit_price || 0) * qtyInL).toFixed(2));
+    } else if (item.unit_type === "count") {
+        item.total = Number(((item.unit_price || 0) * item.qty).toFixed(2));
+    }
+
+    return { ok: true, item };
+}
+
+function removeCartItem(session, itemNo) {
+    const idx = (session.cart || []).findIndex(c => c.cartId === itemNo);
+    if (idx === -1) return { error: "Item number not found in cart." };
+
+    session.cart.splice(idx, 1);
+    session.cart.forEach((c, i) => c.cartId = i + 1);
+    return { ok: true };
+}
+
+function resetConversation(session, keepAddress = true) {
+    const savedAddress = session.address;
+
+    session.pendingItems = null;
+    session.lastSummary = null;
+    session.cart = [];
+    session.status = STATES.IDLE;
+    session.orderId = null;
+    session.expired = false;
+    session.lastActivity = Date.now();
+
+    session.address = keepAddress ? savedAddress : null;
+}
+
+async function ensureCustomerExists(userNumber) {
+    const rows = await dbQuery(
+        "SELECT customer_id FROM customers WHERE whatsapp_number = ? LIMIT 1",
+        [userNumber]
+    );
+
+    if (rows.length > 0) {
+        return rows[0].customer_id;
+    }
+
+    const result = await dbQuery(
+        "INSERT INTO customers (whatsapp_number) VALUES (?)",
+        [userNumber]
+    );
+
+    return result.insertId;
+}
+
+async function getUserAddress(userNumber) {
+    const rows = await dbQuery(
+        `
+        SELECT address
+        FROM customer_address
+        WHERE user_number = ?
+        ORDER BY is_default DESC, id DESC
+        LIMIT 1
+        `,
+        [userNumber]
+    );
+
+    if (rows.length > 0) {
+        return rows[0].address;
+    }
+
+    const customerRows = await dbQuery(
+        "SELECT default_address FROM customers WHERE whatsapp_number = ? LIMIT 1",
+        [userNumber]
+    );
+
+    if (customerRows.length > 0) {
+        return customerRows[0].default_address || null;
+    }
+
+    return null;
+}
+
+/* =========================
+   LOAD CATALOGS
+========================= */
+async function loadCatalogs() {
+    try {
+        const productRows = await dbQuery(
+            `
+            SELECT
+                vp.id AS vendor_product_id,
+                mp.product_id,
+                mp.product_name,
+                mp.brand_name,
+                mp.category_name,
+                mp.unit_type,
+                mp.package_size,
+                mp.aliases,
+                mp.description,
+                vp.selling_price,
+                vp.purchase_price,
+                vp.stock_quantity,
+                vp.stock_unit,
+                vp.unit_id
+            FROM vendor_products vp
+            INNER JOIN master_products mp
+                ON mp.product_id = vp.product_id
+            WHERE vp.vendor_id = ?
+              AND vp.is_available = 1
+              AND vp.is_deleted = 0
+              AND mp.status = 'active'
+            ORDER BY mp.product_name ASC
+            `,
+            [DEFAULT_VENDOR_ID]
+        );
+
+        productCatalog = productRows.map(row => ({
+            ...row,
+            searchTokens: buildSearchTokens(row),
+            selling_price: Number(row.selling_price || 0),
+            purchase_price: Number(row.purchase_price || 0),
+            unit_id: row.unit_id ?? null,
+            vendor_product_id: row.vendor_product_id
+        }));
+
+        const unitRows = await dbQuery(`
+            SELECT
+                unit_id,
+                unit_name,
+                short_name,
+                unit_type
+            FROM units
+            WHERE status='active' OR status IS NULL
+        `);
+
+        unitCatalog = unitRows.map(row => ({
+            ...row,
+            unit_name_norm: normalizeText(row.unit_name),
+            short_name_norm: normalizeText(row.short_name),
+            unit_type_norm: normalizeText(row.unit_type)
+        }));
+
+        console.log(`✅ Loaded ${productCatalog.length} products from DB`);
+        console.log(`✅ Loaded ${unitCatalog.length} units from DB`);
+
+    } catch (err) {
+        console.error('❌ Catalog Load Error:', err.message);
+    }
+
+
+    const unitRows = await dbQuery(
+        `
+        SELECT unit_id, unit_name, short_name, unit_type
+        FROM units
+        WHERE status = 'active' OR status IS NULL
+        `
+    );
+
+    unitCatalog = unitRows.map(row => ({
+        ...row,
+        unit_name_norm: normalizeText(row.unit_name),
+        short_name_norm: normalizeText(row.short_name),
+        unit_type_norm: normalizeText(row.unit_type)
+    }));
+
+    console.log(`✅ Loaded ${productCatalog.length} products from DB`);
+    console.log(`✅ Loaded ${unitCatalog.length} units from DB`);
+}
+
+/* =========================
+   WHATSAPP SEND HELPERS
+========================= */
+async function sendTextMessage(phone_no_id, to, body) {
+    return axios({
+        method: "POST",
+        url: `https://graph.facebook.com/v18.0/${phone_no_id}/messages`,
+        headers: {
+            Authorization: `Bearer ${TOKEN}`,
+            "Content-Type": "application/json",
+        },
+        data: {
+            messaging_product: "whatsapp",
+            to,
+            text: { body }
+        }
+    });
+}
+
+async function sendButtonMessage(phone_no_id, to, body, buttons) {
+    const safeButtons = (buttons || []).slice(0, 3).map(btn => ({
+        type: "reply",
+        reply: {
+            id: btn.id,
+            title: btn.title
+        }
+    }));
+
+    return axios({
+        method: "POST",
+        url: `https://graph.facebook.com/v18.0/${phone_no_id}/messages`,
+        headers: {
+            Authorization: `Bearer ${TOKEN}`,
+            "Content-Type": "application/json",
+        },
+        data: {
+            messaging_product: "whatsapp",
+            to,
+            type: "interactive",
+            interactive: {
+                type: "button",
+                body: { text: body },
+                action: { buttons: safeButtons }
+            }
+        }
+    });
+}
+
+/* =========================
+   FLOW HELPERS
+========================= */
+function getWelcomeMessage() {
+    return (
+        `🌾🌟*Welcome!* to *${SHOP_NAME}* 📍 *New Delhi*🌟🌾\n` +
+        `• Powered by *CODE Bot*\n\n` +
+        "🛒 Thank you for choosing us for your every day needs.\n\n" +
+        "📥 *How to Order (Quick Guide)*\n" +
+        "• Type: *<Product Name> <Quantity Unit>*\n" +
+        "• Example: *Whole Wheat Atta 5 Kg*\n" +
+        "• You can also type just the product name:\n" +
+        "  *Milk*, *Atta*, *Sugar* → bot will assume 1 unit\n" +
+        "• Multiple items: use comma\n" +
+        "  Example: *Atta 2 Kg, Besan 500 g, Milk 1 Ltr*\n\n" +
+        "🔢 *Units Considered*: kg, kgs, g, gm, gms, pcs, pc, no, nos, ml, ltr, l, pkt, pack\n"
+    );
+}
+
+async function sendUnavailableMessage(phone_no_id, from) {
+    await sendButtonMessage(
+        phone_no_id,
+        from,
+        "❌ Item is not available.\nPlease type another item or click below.",
+        [
+            { id: "ADD_OTHER_ITEMS", title: "➕ Add Other Items" }
+        ]
+    );
+}
+
+async function sendPreOrderBill(phone_no_id, from, session, note = "") {
+    const summary = buildTabularSummary(session.cart, "Pre Order Bill");
+    const body =
+        `🏪 *${SHOP_NAME}*\n\n` +
+        (note ? note + "\n\n" : "") +
+        summary.text;
+
+    await sendButtonMessage(phone_no_id, from, body, [
+        { id: "ADD_MORE_ITEMS", title: "➕ More Item" },
+        { id: "EDIT_ITEM", title: "✏️ Edit Item" },
+        { id: "GENERATE_FINAL_BILL", title: "✅ Confirm" },
+    ]);
+
+    session.status = STATES.PREORDER;
+    session.lastSummary = summary;
+}
+
+async function sendFinalBill(phone_no_id, from, session) {
+    if (!session.cart || session.cart.length === 0) {
+        await sendTextMessage(phone_no_id, from, "🛒 Your cart is empty.");
+        return;
+    }
+
+    const summary = buildTabularSummary(session.cart, "Final Bill");
+    const address = session.address || await getUserAddress(from);
+
+    let body = `🏪 *${SHOP_NAME}*\n\n${summary.text}`;
+    let buttons = [];
+
+    if (address) {
+        session.address = address;
+        body += `\n📍 *Delivery Address:*\n${address}\n\n🚚 We’ll deliver ASAP.`;
+        buttons = [
+            { id: "ADD_PAYMENT", title: "💳 Pay Now" }
+        ];
+    } else {
+        body += `\n⚠️ No address found.\nPlease add your delivery address first.`;
+        buttons = [
+            { id: "ADD_ADDRESS", title: "📍 Add Address" }
+        ];
+    }
+
+    await sendButtonMessage(phone_no_id, from, body, buttons);
+    session.status = STATES.FINAL;
+    session.lastSummary = summary;
+}
+
+async function saveFinalOrder(session, from, customerId) {
+    const bill = buildTabularSummary(session.cart, "Final Bill");
+    const orderTime = new Date();
+    const confirmedStatusId = await getStatusIdByCode("confirmed");
+
+    const orderResult = await dbQuery(
+        `
+        INSERT INTO orders
+        (customer_id, vendor_id, total_amount, order_time, status_id, remarks)
+        VALUES (?, ?, ?, ?, ?, ?)
+        `,
+        [
+            customerId,
+            DEFAULT_VENDOR_ID,
+            bill.grandTotal,
+            orderTime,
+            confirmedStatusId,
+            "WhatsApp bot order"
+        ]
+    );
+
+    const orderId = orderResult.insertId;
+
+    for (const item of session.cart) {
+        await dbQuery(
+            `
+            INSERT INTO order_transaction
+            (
+                order_id,
+                customer_id,
+                vendor_id,
+                product_id,
+                qty,
+                unit_id,
+                unit_price,
+                total_price,
+                status_id,
+                remarks,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            `,
+            [
+                orderId,
+                customerId,
+                DEFAULT_VENDOR_ID,
+                item.vendor_product_id,
+                item.qty,
+                item.unit_id || null,
+                item.unit_price,
+                item.total,
+                confirmedStatusId,
+                item.product_name
+            ]
+        );
+    }
+
+    return {
+        orderId,
+        totalAmount: bill.grandTotal
+    };
+}
+
+async function completePayment(phone_no_id, from, session, customerId) {
+    if (!session.cart || session.cart.length === 0) {
+        await sendTextMessage(phone_no_id, from, "🛒 Your cart is empty.");
+        return;
+    }
+
+    const address = session.address || await getUserAddress(from);
+
+    if (!address) {
+        await sendTextMessage(phone_no_id, from, "⚠️ Please add address first.");
+        session.status = STATES.AWAITING_ADDRESS;
+        return;
+    }
+
+    session.address = address;
+
+    const saved = await saveFinalOrder(session, from, customerId);
+    session.orderId = saved.orderId;
+
+    await dbQuery(
+        `
+        INSERT INTO payment_transactions
+        (
+            order_id,
+            customer_id,
+            payment_reference,
+            payment_method,
+            total_amount,
+            payment_status,
+            paid_at,
+            remarks
+        )
+        VALUES (?, ?, ?, ?, ?, ?, NOW(), ?)
+        `,
+        [
+            saved.orderId,
+            customerId,
+            null,
+            "manual",
+            saved.totalAmount,
+            "paid",
+            "Auto-confirmed from WhatsApp bot"
+        ]
+    );
+
+    session.status = STATES.COMPLETED;
+
+    await sendTextMessage(
+        phone_no_id,
+        from,
+        `✅ *Transaction Complete!*\n\n` +
+        `Your order has been confirmed successfully.\n\n` +
+        `📦 Delivery Address:\n${address}\n\n` +
+        `🚚 We’ll deliver ASAP.\n` +
+        `🙏 Thank you for ordering with *${SHOP_NAME}*`
+    );
+
+    resetConversation(session);
+}
+
+/* =========================
+   VERIFY WEBHOOK
+========================= */
+app.get("/webhook", (req, res) => {
+    const mode = req.query["hub.mode"];
+    const challenge = req.query["hub.challenge"];
+    const verify_token = req.query["hub.verify_token"];
+
+    if (mode === "subscribe" && verify_token === MYTOKEN) {
+        console.log("✅ Webhook Verified!");
+        return res.status(200).send(challenge);
+    }
+
+    return res.sendStatus(403);
+});
+
+/* =========================
+   RECEIVE MESSAGE
+========================= */
+app.post("/webhook", async (req, res) => {
+    try {
+        const body = req.body;
+
+        if (!body.object) {
+            return res.sendStatus(404);
+        }
+
+        const value = body.entry?.[0]?.changes?.[0]?.value;
+        const msg = value?.messages?.[0];
+
+        if (!msg) {
+            return res.sendStatus(404);
+        }
+
+        const phone_no_id = value.metadata.phone_number_id;
+        const from = msg.from;
+
+        const customerId = await ensureCustomerExists(from);
+
+        const textBody = msg.text?.body || "";
+        const buttonId = msg.interactive?.button_reply?.id || "";
+        const buttonTitle = msg.interactive?.button_reply?.title || "";
+        const quickText = msg.button?.text || "";
+
+        const incomingRaw = buttonTitle || quickText || buttonId || textBody || "";
+        const incomingText = (textBody || buttonTitle || buttonId || "").trim();
+        const incomingLower = normalizeText(incomingRaw);
+
+        console.log("📩 From:", from);
+        console.log("💬 Message:", incomingRaw);
+
+        await dbQuery(
+            "INSERT INTO messages (customer_id, message) VALUES (?, ?)",
+            [customerId, incomingRaw]
+        );
+
+        if (!sessions[from]) {
+            sessions[from] = {
+                pendingItems: null,
+                lastSummary: null,
+                cart: [],
+                status: STATES.IDLE,
+                expired: false,
+                lastActivity: Date.now(),
+                orderId: null,
+                address: null
+            };
+        }
+
+        const session = sessions[from];
+        const now = Date.now();
+
+        const timedOut = session.lastActivity && (now - session.lastActivity > SESSION_TIMEOUT_MS);
+        if (timedOut) {
+            resetConversation(session, true);
+            session.expired = true;
+        }
+
+        const isGreeting = /^(hi|hello|hii|menu)$/i.test(incomingText) || /^(hi|hello|hii|menu)$/i.test(incomingLower);
+        const isMenu = /^menu$/i.test(incomingText) || /^menu$/i.test(incomingLower);
+        const isCancel = /^cancel$/i.test(incomingText) || /^cancel$/i.test(incomingLower);
+        const isViewCart = /^view cart$/i.test(incomingText) || /^view cart$/i.test(incomingLower);
+        const isMore = /^more$/i.test(incomingText) || /^more$/i.test(incomingLower);
+        const isConfirmButton = buttonId === "GENERATE_FINAL_BILL";
+        const isPayNowButton = buttonId === "ADD_PAYMENT";
+        const isAddAddressButton = buttonId === "ADD_ADDRESS";
+        const isAddOtherItemsButton = buttonId === "ADD_OTHER_ITEMS";
+        const isConfirmText = /^confirm$/i.test(incomingText) || /^confirm$/i.test(incomingLower);
+        const isPayNowText = /^pay now$/i.test(incomingText) || /^pay now$/i.test(incomingLower);
+        const isAddAddressText = /^add address$/i.test(incomingText) || /^address$/i.test(incomingText);
+
+        if (session.expired && !isGreeting) {
+            await sendTextMessage(phone_no_id, from, "⏳ Session expired. Please type *Hi* to start again.");
+            return res.sendStatus(200);
+        }
+
+        if (session.expired && isGreeting) {
+            session.expired = false;
+            resetConversation(session, true);
+            await sendTextMessage(phone_no_id, from, getWelcomeMessage());
+            return res.sendStatus(200);
+        }
+
+        session.lastActivity = now;
+
+        /* =========================
+           GLOBAL COMMANDS
+        ========================== */
+        if (isGreeting || isMenu) {
+            resetConversation(session, true);
+            await sendTextMessage(phone_no_id, from, getWelcomeMessage());
+            return res.sendStatus(200);
+        }
+
+        if (isCancel) {
+            resetConversation(session, true);
+            await sendTextMessage(phone_no_id, from, "❌ Order cancelled and cart cleared.");
+            return res.sendStatus(200);
+        }
+
+        if (isViewCart) {
+            await sendTextMessage(phone_no_id, from, viewCartSummary(session));
+            return res.sendStatus(200);
+        }
+
+        if (isMore) {
+            session.status = STATES.AWAITING_MORE;
+            await sendTextMessage(phone_no_id, from, "➕ Please send more items in the same format.\nExample: Besan 2 Kg, Milk 1 Ltr");
+            return res.sendStatus(200);
+        }
+
+        if (isAddOtherItemsButton || /^add other items$/i.test(incomingText) || /^add other items$/i.test(incomingLower)) {
+            session.status = STATES.AWAITING_MORE;
+            await sendTextMessage(
+                phone_no_id,
+                from,
+                "✅ Please send other items in this format:\n\nAtta 2 Kg, Milk 1 Ltr, Sugar 1 Kg"
+            );
+            return res.sendStatus(200);
+        }
+
+        if (isConfirmButton || isConfirmText) {
+            await sendFinalBill(phone_no_id, from, session);
+            return res.sendStatus(200);
+        }
+
+        if (isAddAddressButton || isAddAddressText) {
+            session.status = STATES.AWAITING_ADDRESS;
+            await sendTextMessage(phone_no_id, from, "📍 Please send your delivery address.");
+            return res.sendStatus(200);
+        }
+
+        if (isPayNowButton || isPayNowText) {
+            await completePayment(phone_no_id, from, session, customerId);
+            return res.sendStatus(200);
+        }
+
+        /* =========================
+           STATE HANDLER
+        ========================== */
+        switch (session.status) {
+            case STATES.IDLE: {
+                const parsed = parseOrderText(incomingText || incomingRaw);
+                const valid = parsed.filter(x => !x.error && x.vendor_product_id);
+
+                if (valid.length === 0) {
+                    await sendUnavailableMessage(phone_no_id, from);
+                    return res.sendStatus(200);
+                }
+
+                session.cart = [];
+                addToCart(session, valid);
+                session.status = STATES.PREORDER;
+
+                const unavailableItems = parsed.filter(x => x.error);
+                const note = unavailableItems.length > 0
+                    ? "ℹ️ Some unavailable items were ignored."
+                    : "";
+
+                await sendPreOrderBill(phone_no_id, from, session, note);
+                return res.sendStatus(200);
+            }
+
+            case STATES.PREORDER: {
+                if (/^edit\s+\d+\s+remove$/i.test(incomingText)) {
+                    const m = incomingText.match(/^edit\s+(\d+)\s+remove$/i);
+                    const itemNo = parseInt(m[1], 10);
+                    const r = removeCartItem(session, itemNo);
+
+                    if (r.error) {
+                        await sendTextMessage(phone_no_id, from, `❌ ${r.error}`);
+                    } else {
+                        await sendPreOrderBill(phone_no_id, from, session, `🗑️ Item ${itemNo} removed.`);
+                    }
+                    return res.sendStatus(200);
+                }
+
+                if (/^edit\s+\d+\s+qty\s+\d+(?:\.\d+)?(?:\s*[a-zA-Z\.]+)?$/i.test(incomingText)) {
+                    const m = incomingText.match(/^edit\s+(\d+)\s+qty\s+(\d+(?:\.\d+)?)(?:\s*([a-zA-Z\.]+))?$/i);
+                    const itemNo = parseInt(m[1], 10);
+                    const newQty = parseFloat(m[2]);
+                    const newUnit = m[3] ? m[3].toLowerCase() : null;
+
+                    const r = editCartItem(session, itemNo, newQty, newUnit);
+
+                    if (r.error) {
+                        await sendTextMessage(phone_no_id, from, `❌ ${r.error}`);
+                    } else {
+                        await sendPreOrderBill(phone_no_id, from, session, `✅ Item ${itemNo} updated.`);
+                    }
+                    return res.sendStatus(200);
+                }
+
+                const parsed = parseOrderText(incomingText || incomingRaw);
+                const valid = parsed.filter(x => !x.error && x.vendor_product_id);
+
+                if (valid.length > 0) {
+                    addToCart(session, valid);
+                    const unavailableItems = parsed.filter(x => x.error);
+                    const note = unavailableItems.length > 0
+                        ? "ℹ️ Some unavailable items were ignored."
+                        : "";
+
+                    await sendPreOrderBill(phone_no_id, from, session, note);
+                    return res.sendStatus(200);
+                }
+
+                await sendTextMessage(phone_no_id, from, "Please use the buttons or type items like: Atta 2 Kg");
+                return res.sendStatus(200);
+            }
+
+            case STATES.AWAITING_MORE: {
+                const parsed = parseOrderText(incomingText || incomingRaw);
+                const valid = parsed.filter(x => !x.error && x.product_id);
+
+                if (valid.length === 0) {
+                    await sendUnavailableMessage(phone_no_id, from);
+                    return res.sendStatus(200);
+                }
+
+                addToCart(session, valid);
+                session.status = STATES.PREORDER;
+
+                const unavailableItems = parsed.filter(x => x.error);
+                const note = unavailableItems.length > 0
+                    ? "ℹ️ Some unavailable items were ignored."
+                    : "";
+
+                await sendPreOrderBill(phone_no_id, from, session, note);
+                return res.sendStatus(200);
+            }
+
+            case STATES.FINAL: {
+                if (isAddAddressButton || isAddAddressText) {
+                    session.status = STATES.AWAITING_ADDRESS;
+                    await sendTextMessage(phone_no_id, from, "📍 Please send your delivery address.");
+                    return res.sendStatus(200);
+                }
+
+                if (isPayNowButton || isPayNowText) {
+                    await completePayment(phone_no_id, from, session, customerId);
+                    return res.sendStatus(200);
+                }
+
+                await sendTextMessage(phone_no_id, from, "Please tap *Pay Now* or *Add Address*.");
+                return res.sendStatus(200);
+            }
+
+            case STATES.AWAITING_ADDRESS: {
+                const address = incomingText.trim();
+
+                if (!address) {
+                    await sendTextMessage(phone_no_id, from, "📍 Please send a valid address.");
+                    return res.sendStatus(200);
+                }
+
+                await dbQuery(
+                    `
+                    INSERT INTO customer_address
+                    (customer_id, user_number, address)
+                    VALUES (?, ?, ?)
+                    ON DUPLICATE KEY UPDATE
+                    address = VALUES(address)
+                    `,
+                    [customerId, from, address]
+                );
+
+                await dbQuery(
+                    `
+                    UPDATE customers
+                    SET default_address = ?
+                    WHERE customer_id = ?
+                    `,
+                    [address, customerId]
+                );
+
+                session.address = address;
+                session.status = STATES.FINAL;
+
+                await sendTextMessage(
+                    phone_no_id,
+                    from,
+                    "✅ Address saved successfully.\nNow tap *Pay Now* to complete your order."
+                );
+
+                await sendFinalBill(phone_no_id, from, session);
+                return res.sendStatus(200);
+            }
+
+            default: {
+                const parsed = parseOrderText(incomingText || incomingRaw);
+                const valid = parsed.filter(x => !x.error && x.product_id);
+
+                if (valid.length > 0) {
+                    session.cart = [];
+                    addToCart(session, valid);
+                    session.status = STATES.PREORDER;
+
+                    const unavailableItems = parsed.filter(x => x.error);
+                    const note = unavailableItems.length > 0
+                        ? "ℹ️ Some unavailable items were ignored."
+                        : "";
+
+                    await sendPreOrderBill(phone_no_id, from, session, note);
+                    return res.sendStatus(200);
+                }
+
+                await sendTextMessage(phone_no_id, from, "Please send a product name or type *Hi* to start.");
+                return res.sendStatus(200);
+            }
+        }
+    } catch (err) {
+        console.log("❌ Webhook Error:", err.response?.data || err.message);
+        return res.sendStatus(200);
+    }
+});
+
+/* =========================
+   START SERVER
+========================= */
+async function startServer() {
+    try {
+        await loadCatalogs();
+
+        const PORT = process.env.PORT || 8000;
+        app.listen(PORT, () => {
+            console.log(`🚀 Webhook is listening on port ${PORT}`);
+        });
+    } catch (err) {
+        console.error("❌ Failed to start server:", err.message);
+        process.exit(1);
+    }
+}
+
+startServer();
