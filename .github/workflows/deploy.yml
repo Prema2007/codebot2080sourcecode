@@ -2,76 +2,137 @@ name: CODE Bot Azure Deployment
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - ".github/**"
+      - "README.md"
 
 permissions:
   contents: read
 
+concurrency:
+  group: codebot2080-production
+  cancel-in-progress: false
+
 jobs:
   test-connection:
-    name: Diagnose Azure VM SSH
+    name: Test Azure VM SSH and Repository
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Check required secrets
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
         env:
           VM_HOST: ${{ secrets.AZURE_VM_HOST }}
           VM_USER: ${{ secrets.AZURE_VM_USER }}
+          APP_PATH: ${{ secrets.AZURE_APP_PATH }}
           SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
-        shell: bash
         run: |
           set -euo pipefail
 
-          test -n "$VM_HOST" || { echo "ERROR: AZURE_VM_HOST is empty"; exit 1; }
-          test -n "$VM_USER" || { echo "ERROR: AZURE_VM_USER is empty"; exit 1; }
-          test -n "$SSH_PRIVATE_KEY" || { echo "ERROR: AZURE_VM_SSH_KEY is empty"; exit 1; }
+          test -n "$VM_HOST" || {
+            echo "::error::AZURE_VM_HOST is missing."
+            exit 1
+          }
+
+          test -n "$VM_USER" || {
+            echo "::error::AZURE_VM_USER is missing."
+            exit 1
+          }
+
+          test -n "$APP_PATH" || {
+            echo "::error::AZURE_APP_PATH is missing."
+            exit 1
+          }
+
+          test -n "$SSH_PRIVATE_KEY" || {
+            echo "::error::AZURE_VM_SSH_KEY is missing."
+            exit 1
+          }
 
           echo "Required secrets are present."
-          echo "SSH user: $VM_USER"
+          echo "SSH username: $VM_USER"
+          echo "Application path: $APP_PATH"
 
-      - name: Check VM port 22
-        env:
-          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
-        shell: bash
-        run: |
-          set -u
-          echo "Testing TCP connectivity to SSH port 22..."
-          if timeout 10 bash -c 'echo > /dev/tcp/$1/22' _ "$VM_HOST" 2>/dev/null; then
-            echo "SUCCESS: Port 22 is reachable."
-          else
-            echo "ERROR: Port 22 is not reachable from GitHub Actions."
-            echo "Check Azure NSG, VM firewall and SSH service."
-            exit 1
-          fi
-
-      - name: Test SSH key and authentication
-        env:
-          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
-          VM_USER: ${{ secrets.AZURE_VM_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+      - name: Validate repository files
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
+          test -f package.json || {
+            echo "::error::package.json is missing from the repository root."
+            exit 1
+          }
 
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/azure_vm_key"
-          chmod 600 "$HOME/.ssh/azure_vm_key"
+          test -f package-lock.json || {
+            echo "::error::package-lock.json is missing from the repository root."
+            exit 1
+          }
 
-          echo "Validating SSH private key..."
-          ssh-keygen -y -f "$HOME/.ssh/azure_vm_key" > /dev/null
+          test -f index.js || {
+            echo "::error::index.js is missing from the repository root."
+            exit 1
+          }
 
-          echo "Reading VM SSH host key..."
+          echo "Required Node.js application files are present."
+
+      - name: Validate SSH key and connect to Azure VM
+        shell: bash
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+          APP_PATH: ${{ secrets.AZURE_APP_PATH }}
+        run: |
+          set -euo pipefail
+
+          install -d -m 700 "$HOME/.ssh"
+          KEY_FILE="$HOME/.ssh/azure_vm_key"
+
+          cleanup() {
+            rm -f "$KEY_FILE"
+          }
+          trap cleanup EXIT
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          echo "Validating private key..."
+          ssh-keygen -y -f "$KEY_FILE" > /dev/null
+
+          echo "Checking SSH port 22..."
+          timeout 10 bash -c 'echo > /dev/tcp/$1/22' _ "$VM_HOST" || {
+            echo "::error::Azure VM port 22 is not reachable."
+            exit 1
+          }
+
+          echo "Obtaining SSH host key..."
           ssh-keyscan -T 10 -H "$VM_HOST" >> "$HOME/.ssh/known_hosts"
 
-          echo "Testing SSH authentication..."
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+          echo "Testing SSH authentication and application directory..."
           ssh \
-            -i "$HOME/.ssh/azure_vm_key" \
+            -i "$KEY_FILE" \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
             -o StrictHostKeyChecking=yes \
             "$VM_USER@$VM_HOST" \
-            'whoami && hostname'
+            "set -eu
+             echo 'SSH authentication successful.'
+             whoami
+             hostname
+             test -d '$APP_PATH'
+             echo 'Application directory exists.'
+             test -f '$APP_PATH/package.json'
+             echo 'Application package.json exists.'
+             "
 
-          rm -f "$HOME/.ssh/azure_vm_key"
+          echo "SSH and application directory checks passed."
