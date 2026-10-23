@@ -39,4 +39,3 @@ jobs:
             'whoami && hostname'
 
           rm -f ~/.ssh/azure_vm_key
-```
