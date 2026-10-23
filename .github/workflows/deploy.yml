@@ -1,0 +1,41 @@
+name: CODE Bot Azure Deployment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-connection:
+    name: Test Azure VM SSH
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test SSH connection
+        shell: bash
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/azure_vm_key"
+          chmod 600 "$HOME/.ssh/azure_vm_key"
+
+          ssh-keygen -y -f "$HOME/.ssh/azure_vm_key" > /dev/null
+
+          ssh-keyscan -H "$VM_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+
+          ssh \
+            -i "$HOME/.ssh/azure_vm_key" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            "$VM_USER@$VM_HOST" \
+            'whoami && hostname'
+
+          rm -f "$HOME/.ssh/azure_vm_key"
