@@ -8,16 +8,47 @@ permissions:
 
 jobs:
   test-connection:
-    name: Test Azure VM SSH
+    name: Diagnose Azure VM SSH
     runs-on: ubuntu-latest
 
     steps:
-      - name: Test SSH connection
-        shell: bash
+      - name: Check required secrets
         env:
           VM_HOST: ${{ secrets.AZURE_VM_HOST }}
           VM_USER: ${{ secrets.AZURE_VM_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -n "$VM_HOST" || { echo "ERROR: AZURE_VM_HOST is empty"; exit 1; }
+          test -n "$VM_USER" || { echo "ERROR: AZURE_VM_USER is empty"; exit 1; }
+          test -n "$SSH_PRIVATE_KEY" || { echo "ERROR: AZURE_VM_SSH_KEY is empty"; exit 1; }
+
+          echo "Required secrets are present."
+          echo "SSH user: $VM_USER"
+
+      - name: Check VM port 22
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+        shell: bash
+        run: |
+          set -u
+          echo "Testing TCP connectivity to SSH port 22..."
+          if timeout 10 bash -c 'echo > /dev/tcp/$1/22' _ "$VM_HOST" 2>/dev/null; then
+            echo "SUCCESS: Port 22 is reachable."
+          else
+            echo "ERROR: Port 22 is not reachable from GitHub Actions."
+            echo "Check Azure NSG, VM firewall and SSH service."
+            exit 1
+          fi
+
+      - name: Test SSH key and authentication
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -27,14 +58,19 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/azure_vm_key"
           chmod 600 "$HOME/.ssh/azure_vm_key"
 
+          echo "Validating SSH private key..."
           ssh-keygen -y -f "$HOME/.ssh/azure_vm_key" > /dev/null
 
-          ssh-keyscan -H "$VM_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          echo "Reading VM SSH host key..."
+          ssh-keyscan -T 10 -H "$VM_HOST" >> "$HOME/.ssh/known_hosts"
 
+          echo "Testing SSH authentication..."
           ssh \
             -i "$HOME/.ssh/azure_vm_key" \
+            -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
             "$VM_USER@$VM_HOST" \
             'whoami && hostname'
 
