@@ -1,4 +1,3 @@
-```yaml
 name: CODE Bot Azure Deployment
 
 on:
@@ -18,6 +17,7 @@ jobs:
           VM_HOST: ${{ secrets.AZURE_VM_HOST }}
           VM_USER: ${{ secrets.AZURE_VM_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
 
