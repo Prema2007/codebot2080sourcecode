@@ -1,13 +1,11 @@
 name: CODE Bot Azure Deployment
 
 on:
-  workflow_dispatch:
   push:
     branches:
       - main
-    paths-ignore:
-      - ".github/**"
-      - "README.md"
+
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,16 +15,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test-connection:
-    name: Test Azure VM SSH and Repository
+  deploy:
+    name: Deploy to Azure VM
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout repository
+      # Step 1: Download the latest GitHub source code
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Validate required secrets
+      # Step 2: Validate secrets and application files
+      - name: Validate deployment configuration
         shell: bash
         env:
           VM_HOST: ${{ secrets.AZURE_VM_HOST }}
@@ -56,83 +56,233 @@ jobs:
             exit 1
           }
 
-          echo "Required secrets are present."
-          echo "SSH username: $VM_USER"
-          echo "Application path: $APP_PATH"
-
-      - name: Validate repository files
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f package.json || {
-            echo "::error::package.json is missing from the repository root."
+          test "$APP_PATH" = "/var/www/codebot2080" || {
+            echo "::error::Unexpected application path."
             exit 1
           }
 
-          test -f package-lock.json || {
-            echo "::error::package-lock.json is missing from the repository root."
-            exit 1
-          }
+          test -f package.json
+          test -f package-lock.json
+          test -f index.js
 
-          test -f index.js || {
-            echo "::error::index.js is missing from the repository root."
-            exit 1
-          }
+          echo "Deployment configuration validated."
 
-          echo "Required Node.js application files are present."
-
-      - name: Validate SSH key and connect to Azure VM
+      # Step 3: Prepare SSH
+      - name: Configure SSH
         shell: bash
         env:
-          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
-          VM_USER: ${{ secrets.AZURE_VM_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
-          APP_PATH: ${{ secrets.AZURE_APP_PATH }}
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
         run: |
           set -euo pipefail
 
           install -d -m 700 "$HOME/.ssh"
-          KEY_FILE="$HOME/.ssh/azure_vm_key"
 
-          cleanup() {
-            rm -f "$KEY_FILE"
-          }
-          trap cleanup EXIT
+          printf '%s\n' "$SSH_PRIVATE_KEY" \
+            > "$HOME/.ssh/azure_vm_key"
 
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$KEY_FILE"
-          chmod 600 "$KEY_FILE"
+          chmod 600 "$HOME/.ssh/azure_vm_key"
 
-          echo "Validating private key..."
-          ssh-keygen -y -f "$KEY_FILE" > /dev/null
+          ssh-keygen -y \
+            -f "$HOME/.ssh/azure_vm_key" \
+            > /dev/null
 
-          echo "Checking SSH port 22..."
-          timeout 10 bash -c 'echo > /dev/tcp/$1/22' _ "$VM_HOST" || {
-            echo "::error::Azure VM port 22 is not reachable."
-            exit 1
-          }
+          # Verify that the VM's SSH port is reachable.
+          timeout 10 bash -c \
+            'echo > /dev/tcp/$1/22' _ "$VM_HOST" || {
+              echo "::error::SSH port 22 is unreachable. Check Azure NSG and VM firewall."
+              exit 1
+            }
 
-          echo "Obtaining SSH host key..."
-          ssh-keyscan -T 10 -H "$VM_HOST" >> "$HOME/.ssh/known_hosts"
+          # Learn the server host key for this connection.
+          ssh-keyscan -T 10 -H "$VM_HOST" \
+            >> "$HOME/.ssh/known_hosts"
 
           chmod 600 "$HOME/.ssh/known_hosts"
 
-          echo "Testing SSH authentication and application directory..."
+          echo "SSH configuration completed."
+
+      # Step 4: Verify SSH access and deployment prerequisites
+      - name: Verify Azure VM
+        shell: bash
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+          APP_PATH: ${{ secrets.AZURE_APP_PATH }}
+        run: |
+          set -euo pipefail
+
           ssh \
-            -i "$KEY_FILE" \
+            -i "$HOME/.ssh/azure_vm_key" \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
             -o StrictHostKeyChecking=yes \
             "$VM_USER@$VM_HOST" \
-            "set -eu
-             echo 'SSH authentication successful.'
-             whoami
-             hostname
-             test -d '$APP_PATH'
-             echo 'Application directory exists.'
-             test -f '$APP_PATH/package.json'
-             echo 'Application package.json exists.'
-             "
+            "bash -s -- '$APP_PATH'" <<'REMOTE'
+          set -euo pipefail
 
-          echo "SSH and application directory checks passed."
+          APP_PATH="$1"
+
+          echo "Connected user: $(whoami)"
+          echo "Server: $(hostname)"
+
+          test -d "$APP_PATH" || {
+            echo "Application directory does not exist."
+            exit 1
+          }
+
+          test -f "$APP_PATH/.env" || {
+            echo "Application .env file is missing."
+            exit 1
+          }
+
+          command -v node
+          command -v npm
+
+          echo "Checking deployment service..."
+          systemctl is-enabled codebot2080.service
+
+          echo "VM prerequisites validated."
+          REMOTE
+
+      # Step 5: Package source without secrets or node_modules
+      - name: Create deployment package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tar \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='.db_password' \
+            --exclude='*.log' \
+            -czf "$RUNNER_TEMP/codebot2080.tar.gz" \
+            -C "$GITHUB_WORKSPACE" .
+
+          echo "Deployment package created."
+
+      # Step 6: Upload the source package
+      - name: Upload package to Azure VM
+        shell: bash
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          set -euo pipefail
+
+          scp \
+            -i "$HOME/.ssh/azure_vm_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$RUNNER_TEMP/codebot2080.tar.gz" \
+            "$VM_USER@$VM_HOST:/tmp/codebot2080-deploy.tar.gz"
+
+          echo "Package uploaded."
+
+      # Step 7: Update application and restart the service
+      - name: Deploy and restart application
+        shell: bash
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+          APP_PATH: ${{ secrets.AZURE_APP_PATH }}
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i "$HOME/.ssh/azure_vm_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$VM_USER@$VM_HOST" \
+            "bash -s -- '$APP_PATH'" <<'REMOTE'
+          set -euo pipefail
+
+          APP_PATH="$1"
+          PACKAGE="/tmp/codebot2080-deploy.tar.gz"
+
+          test -f "$PACKAGE"
+          test -f "$APP_PATH/.env"
+
+          # Update application files while preserving server secrets.
+          tar \
+            --no-same-owner \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='.db_password' \
+            --exclude='node_modules' \
+            -xzf "$PACKAGE" \
+            -C "$APP_PATH"
+
+          rm -f "$PACKAGE"
+
+          cd "$APP_PATH"
+
+          # Install dependencies based on package-lock.json.
+          npm ci --omit=dev
+
+          # Restart the preconfigured systemd service.
+          sudo -n systemctl restart codebot2080.service
+
+          # Confirm the service is active.
+          sudo -n systemctl is-active --quiet codebot2080.service
+
+          echo "Application deployment completed."
+          REMOTE
+
+      # Step 8: Check the application health endpoint
+      - name: Verify application health
+        shell: bash
+        env:
+          VM_HOST: ${{ secrets.AZURE_VM_HOST }}
+          VM_USER: ${{ secrets.AZURE_VM_USER }}
+        run: |
+          set -euo pipefail
+
+          ssh \
+            -i "$HOME/.ssh/azure_vm_key" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$VM_USER@$VM_HOST" \
+            'bash -s' <<'REMOTE'
+          set -euo pipefail
+
+          echo "Checking application on port 8000..."
+
+          for attempt in $(seq 1 12); do
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 5 \
+              http://127.0.0.1:8000/; then
+              echo
+              echo "Application health check passed."
+              exit 0
+            fi
+
+            echo "Attempt $attempt failed; retrying..."
+            sleep 5
+          done
+
+          echo "Application health check failed."
+          sudo -n journalctl \
+            -u codebot2080.service \
+            -n 80 \
+            --no-pager || true
+
+          exit 1
+          REMOTE
+
+      # Step 9: Clean up temporary SSH key
+      - name: Clean up SSH key
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$HOME/.ssh/azure_vm_key"
