@@ -21,11 +21,11 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # Step 1: Download the latest GitHub source code
+      # Step 1: Checkout source code
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # Step 2: Validate secrets and application files
+      # Step 2: Validate repository and GitHub secrets
       - name: Validate deployment configuration
         shell: bash
         env:
@@ -37,27 +37,27 @@ jobs:
           set -euo pipefail
 
           test -n "$VM_HOST" || {
-            echo "::error::AZURE_VM_HOST is missing."
+            echo "::error::AZURE_VM_HOST is missing"
             exit 1
           }
 
           test -n "$VM_USER" || {
-            echo "::error::AZURE_VM_USER is missing."
+            echo "::error::AZURE_VM_USER is missing"
             exit 1
           }
 
           test -n "$APP_PATH" || {
-            echo "::error::AZURE_APP_PATH is missing."
+            echo "::error::AZURE_APP_PATH is missing"
             exit 1
           }
 
           test -n "$SSH_PRIVATE_KEY" || {
-            echo "::error::AZURE_VM_SSH_KEY is missing."
+            echo "::error::AZURE_VM_SSH_KEY is missing"
             exit 1
           }
 
           test "$APP_PATH" = "/var/www/codebot2080" || {
-            echo "::error::Unexpected application path."
+            echo "::error::Unexpected application path"
             exit 1
           }
 
@@ -67,7 +67,7 @@ jobs:
 
           echo "Deployment configuration validated."
 
-      # Step 3: Prepare SSH
+      # Step 3: Configure SSH
       - name: Configure SSH
         shell: bash
         env:
@@ -87,14 +87,12 @@ jobs:
             -f "$HOME/.ssh/azure_vm_key" \
             > /dev/null
 
-          # Verify that the VM's SSH port is reachable.
           timeout 10 bash -c \
             'echo > /dev/tcp/$1/22' _ "$VM_HOST" || {
-              echo "::error::SSH port 22 is unreachable. Check Azure NSG and VM firewall."
+              echo "::error::SSH port 22 is unreachable"
               exit 1
             }
 
-          # Learn the server host key for this connection.
           ssh-keyscan -T 10 -H "$VM_HOST" \
             >> "$HOME/.ssh/known_hosts"
 
@@ -102,8 +100,8 @@ jobs:
 
           echo "SSH configuration completed."
 
-      # Step 4: Verify SSH access and deployment prerequisites
-      - name: Verify Azure VM
+      # Step 4: Verify VM, application path and PM2
+      - name: Verify Azure VM and PM2
         shell: bash
         env:
           VM_HOST: ${{ secrets.AZURE_VM_HOST }}
@@ -127,26 +125,47 @@ jobs:
           echo "Connected user: $(whoami)"
           echo "Server: $(hostname)"
 
-          test -d "$APP_PATH" || {
-            echo "Application directory does not exist."
-            exit 1
-          }
-
-          test -f "$APP_PATH/.env" || {
-            echo "Application .env file is missing."
-            exit 1
-          }
+          test -d "$APP_PATH"
+          test -f "$APP_PATH/.env"
+          test -f "$APP_PATH/package.json"
+          test -f "$APP_PATH/package-lock.json"
+          test -f "$APP_PATH/index.js"
 
           command -v node
           command -v npm
 
-          echo "Checking deployment service..."
-          systemctl is-enabled codebot2080.service
+          # Include common PM2 installation paths.
+          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nvm/versions/node/$(node -v)/bin:/usr/local/bin:/usr/bin:/bin"
 
-          echo "VM prerequisites validated."
+          PM2_BIN="$(command -v pm2 || true)"
+
+          if [ -z "$PM2_BIN" ]; then
+            echo "Searching for PM2 in the user's NVM installation..."
+
+            PM2_BIN="$(find "$HOME/.nvm/versions/node" \
+              -type f -path '*/bin/pm2' -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$PM2_BIN" ] || [ ! -x "$PM2_BIN" ]; then
+            echo "::error::PM2 executable was not found for this user."
+            exit 1
+          fi
+
+          echo "PM2 executable: $PM2_BIN"
+
+          "$PM2_BIN" describe codebot
+
+          echo "Checking current application health..."
+
+          curl --fail --silent --show-error \
+            --max-time 5 \
+            http://127.0.0.1:8000/
+
+          echo
+          echo "VM and PM2 checks passed."
           REMOTE
 
-      # Step 5: Package source without secrets or node_modules
+      # Step 5: Create source package without secrets
       - name: Create deployment package
         shell: bash
         run: |
@@ -165,7 +184,7 @@ jobs:
 
           echo "Deployment package created."
 
-      # Step 6: Upload the source package
+      # Step 6: Upload package to the VM
       - name: Upload package to Azure VM
         shell: bash
         env:
@@ -182,9 +201,9 @@ jobs:
             "$RUNNER_TEMP/codebot2080.tar.gz" \
             "$VM_USER@$VM_HOST:/tmp/codebot2080-deploy.tar.gz"
 
-          echo "Package uploaded."
+          echo "Package uploaded successfully."
 
-      # Step 7: Update application and restart the service
+      # Step 7: Deploy source and restart PM2 application
       - name: Deploy and restart application
         shell: bash
         env:
@@ -209,7 +228,7 @@ jobs:
           test -f "$PACKAGE"
           test -f "$APP_PATH/.env"
 
-          # Update application files while preserving server secrets.
+          # Preserve server-specific environment and dependencies.
           tar \
             --no-same-owner \
             --exclude='.env' \
@@ -223,19 +242,37 @@ jobs:
 
           cd "$APP_PATH"
 
-          # Install dependencies based on package-lock.json.
+          # Make PM2 available in non-interactive SSH sessions.
+          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nvm/versions/node/$(node -v)/bin:/usr/local/bin:/usr/bin:/bin"
+
+          PM2_BIN="$(command -v pm2 || true)"
+
+          if [ -z "$PM2_BIN" ]; then
+            PM2_BIN="$(find "$HOME/.nvm/versions/node" \
+              -type f -path '*/bin/pm2' -print -quit 2>/dev/null || true)"
+          fi
+
+          if [ -z "$PM2_BIN" ] || [ ! -x "$PM2_BIN" ]; then
+            echo "::error::PM2 executable was not found."
+            exit 1
+          fi
+
+          # Confirm the existing PM2 application before changing dependencies.
+          "$PM2_BIN" describe codebot
+
+          # Install dependencies from the lock file.
           npm ci --omit=dev
 
-          # Restart the preconfigured systemd service.
-          sudo -n systemctl restart codebot2080.service
+          # Restart the existing PM2 application.
+          "$PM2_BIN" restart codebot --update-env
 
-          # Confirm the service is active.
-          sudo -n systemctl is-active --quiet codebot2080.service
+          # Verify PM2 reports the application online.
+          "$PM2_BIN" describe codebot
 
-          echo "Application deployment completed."
+          echo "Deployment and PM2 restart completed."
           REMOTE
 
-      # Step 8: Check the application health endpoint
+      # Step 8: Verify application health
       - name: Verify application health
         shell: bash
         env:
@@ -262,6 +299,7 @@ jobs:
               --show-error \
               --max-time 5 \
               http://127.0.0.1:8000/; then
+
               echo
               echo "Application health check passed."
               exit 0
@@ -271,16 +309,20 @@ jobs:
             sleep 5
           done
 
-          echo "Application health check failed."
-          sudo -n journalctl \
-            -u codebot2080.service \
-            -n 80 \
-            --no-pager || true
+          echo "::error::Application health check failed."
+
+          export PATH="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nvm/versions/node/$(node -v)/bin:/usr/local/bin:/usr/bin:/bin"
+
+          PM2_BIN="$(command -v pm2 || true)"
+
+          if [ -n "$PM2_BIN" ]; then
+            "$PM2_BIN" logs codebot --lines 50 --nostream || true
+          fi
 
           exit 1
           REMOTE
 
-      # Step 9: Clean up temporary SSH key
+      # Step 9: Remove temporary SSH key
       - name: Clean up SSH key
         if: always()
         shell: bash
