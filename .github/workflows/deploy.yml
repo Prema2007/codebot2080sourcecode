@@ -13,29 +13,29 @@ jobs:
 
     steps:
       - name: Test SSH connection
+        shell: bash
         env:
           VM_HOST: ${{ secrets.AZURE_VM_HOST }}
           VM_USER: ${{ secrets.AZURE_VM_USER }}
           SSH_PRIVATE_KEY: ${{ secrets.AZURE_VM_SSH_KEY }}
-        shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
 
-          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/azure_vm_key
-          chmod 600 ~/.ssh/azure_vm_key
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/azure_vm_key"
+          chmod 600 "$HOME/.ssh/azure_vm_key"
 
-          ssh-keygen -y -f ~/.ssh/azure_vm_key > /dev/null
+          ssh-keygen -y -f "$HOME/.ssh/azure_vm_key" > /dev/null
 
-          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$VM_HOST" >> "$HOME/.ssh/known_hosts" 2>/dev/null
 
           ssh \
-            -i ~/.ssh/azure_vm_key \
+            -i "$HOME/.ssh/azure_vm_key" \
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
             "$VM_USER@$VM_HOST" \
             'whoami && hostname'
 
-          rm -f ~/.ssh/azure_vm_key
+          rm -f "$HOME/.ssh/azure_vm_key"
