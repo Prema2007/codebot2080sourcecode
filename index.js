@@ -17,16 +17,14 @@ app.use(express.urlencoded({
     extended: true
 }));
 
-
 /* =========================================================
    CONFIG
 ========================================================= */
 
-const PORT =
-    Number(
-        process.env.PORT ||
-        8000
-    );
+const PORT = Number(
+    process.env.PORT ||
+    8000
+);
 
 const TOKEN =
     process.env.TOKEN ||
@@ -44,13 +42,21 @@ const GRAPH_VERSION =
     process.env.GRAPH_VERSION ||
     "v25.0";
 
+const GOOGLE_MAPS_API_KEY =
+    process.env.GOOGLE_MAPS_API_KEY ||
+    "";
+
+const PUBLIC_BASE_URL =
+    String(
+        process.env.PUBLIC_BASE_URL ||
+        "https://code-bot.in"
+    ).replace(/\/+$/, "");
 
 const SESSION_TIMEOUT_MS =
     30 * 60 * 1000;
 
 const CATALOG_CACHE_MS =
-    60 * 1000;
-
+    30 * 60 * 1000;
 
 const merchantContext =
     new AsyncLocalStorage();
@@ -64,49 +70,44 @@ const catalogCache =
 const conversationContexts =
     new Map();
 
-
 /* =========================================================
    DATABASE
 ========================================================= */
 
-const db =
-    mysql.createPool({
+const db = mysql.createPool({
+    host:
+        process.env.DB_HOST ||
+        "localhost",
 
-        host:
-            process.env.DB_HOST ||
-            "localhost",
+    user:
+        process.env.DB_USER ||
+        "root",
 
-        user:
-            process.env.DB_USER ||
-            "root",
+    password:
+        process.env.DB_PASSWORD ||
+        "",
 
-        password:
-            process.env.DB_PASSWORD ||
-            "",
+    database:
+        process.env.DB_NAME ||
+        "code_bot_version1.1",
 
-        database:
-            process.env.DB_NAME ||
-            "code_bot_version1.1",
+    waitForConnections:
+        true,
 
-        waitForConnections:
-            true,
+    connectionLimit:
+        10,
 
-        connectionLimit:
-            10,
+    queueLimit:
+        0,
 
-        queueLimit:
-            0,
-
-        decimalNumbers:
-            true
-    });
-
+    decimalNumbers:
+        true
+});
 
 async function query(
     sql,
     params = []
 ) {
-
     const [rows] =
         await db.execute(
             sql,
@@ -115,7 +116,6 @@ async function query(
 
     return rows;
 }
-
 
 /* =========================================================
    CURRENT MERCHANT CONTEXT
@@ -128,7 +128,6 @@ function merchant() {
             .getStore();
 
     if (!value) {
-
         throw new Error(
             "Merchant context missing"
         );
@@ -137,53 +136,59 @@ function merchant() {
     return value;
 }
 
-
 function currentMerchantId() {
-
-    return (
-        merchant()
-            .merchantId
-    );
+    return merchant().merchantId;
 }
-
 
 function currentChannelId() {
-
-    return (
-        merchant()
-            .channelId
-    );
+    return merchant().channelId;
 }
-
 
 function currentShopName() {
-
-    return (
-        merchant()
-            .shopName
-    );
+    return merchant().shopName;
 }
 
+function currentMerchantLogoUrl() {
+
+    const merchantId =
+        currentMerchantId();
+
+    const specificEnv =
+        process.env[
+            `MERCHANT_LOGO_URL_${merchantId}`
+        ];
+
+    const genericEnv =
+        process.env.MERCHANT_LOGO_URL;
+
+    if (
+        specificEnv
+    ) {
+
+        return String(
+            specificEnv
+        ).trim();
+    }
+
+    if (
+        genericEnv
+    ) {
+
+        return String(
+            genericEnv
+        ).trim();
+    }
+
+    return null;
+}
 
 function currentProducts() {
-
-    return (
-        merchant()
-            .products ||
-        []
-    );
+    return merchant().products || [];
 }
-
 
 function currentUnits() {
-
-    return (
-        merchant()
-            .units ||
-        []
-    );
+    return merchant().units || [];
 }
-
 
 /* =========================================================
    STATES
@@ -206,6 +211,9 @@ const STATES = {
     AWAITING_EDIT_DETAILS:
         "AWAITING_EDIT_DETAILS",
 
+    AWAITING_ADDRESS_CHOICE:
+        "AWAITING_ADDRESS_CHOICE",
+
     AWAITING_ADDRESS:
         "AWAITING_ADDRESS",
 
@@ -218,7 +226,6 @@ const STATES = {
     COMPLETED:
         "COMPLETED"
 };
-
 
 /* =========================================================
    TEXT / UNIT HELPERS
@@ -243,7 +250,6 @@ function normalizeText(
             " "
         );
 }
-
 
 const UNIT_ALIASES = {
 
@@ -293,7 +299,6 @@ const UNIT_ALIASES = {
     packs: "pkt"
 };
 
-
 function normalizeUnit(
     value
 ) {
@@ -313,7 +318,6 @@ function normalizeUnit(
     );
 }
 
-
 function unitDimension(
     unit
 ) {
@@ -329,10 +333,8 @@ function unitDimension(
             "g"
         ].includes(u)
     ) {
-
         return "weight";
     }
-
 
     if (
         [
@@ -340,10 +342,8 @@ function unitDimension(
             "ml"
         ].includes(u)
     ) {
-
         return "volume";
     }
-
 
     if (
         [
@@ -351,14 +351,11 @@ function unitDimension(
             "pkt"
         ].includes(u)
     ) {
-
         return "count";
     }
 
-
     return null;
 }
-
 
 function productDimension(
     product,
@@ -370,77 +367,58 @@ function productDimension(
             requestedUnit
         );
 
-
     if (requested) {
-
         return requested;
     }
 
-
     const stockDimension =
         unitDimension(
-
             product?.stock_unit ||
-
             product?.unit_name
         );
 
-
     if (stockDimension) {
-
         return stockDimension;
     }
 
-
     const raw =
         normalizeText(
-
             product?.unit_type ||
             ""
         );
-
 
     const weight =
         /(^|[\/\s])(g|kg|gram|grams|kilogram|kilograms)([\/\s]|$)/i
             .test(raw);
 
-
     const volume =
         /(^|[\/\s])(ml|l|ltr|litre|liter|litres|liters)([\/\s]|$)/i
             .test(raw);
-
 
     const count =
         /(piece|pieces|pcs|packet|pack|pkt|set|pair|count|nos|number)/i
             .test(raw);
 
-
     if (count) {
         return "count";
     }
-
 
     if (
         weight &&
         !volume
     ) {
-
         return "weight";
     }
-
 
     if (
         volume &&
         !weight
     ) {
-
         return "volume";
     }
 
-
     return "count";
 }
-
 
 function defaultUnit(
     dimension
@@ -450,23 +428,18 @@ function defaultUnit(
         dimension ===
         "weight"
     ) {
-
         return "kg";
     }
-
 
     if (
         dimension ===
         "volume"
     ) {
-
         return "ltr";
     }
 
-
     return "pcs";
 }
-
 
 function findUnitId(
     unit
@@ -477,23 +450,18 @@ function findUnitId(
             unit
         );
 
-
     const row =
         currentUnits()
             .find(
                 u =>
-
                     normalizeUnit(
                         u.short_name
-                    ) ===
-                        wanted ||
+                    ) === wanted ||
 
                     normalizeUnit(
                         u.unit_name
-                    ) ===
-                        wanted
+                    ) === wanted
             );
-
 
     return (
         row
@@ -501,7 +469,6 @@ function findUnitId(
             : null
     );
 }
-
 
 function quantityForStock(
     item
@@ -513,54 +480,34 @@ function quantityForStock(
             0
         );
 
-
     const unit =
         normalizeUnit(
             item.unit
         );
 
-
     const dimension =
-
         item.unit_type ||
-
         productDimension(
             item,
             unit
         );
 
-
     if (
-        dimension ===
-            "weight" &&
-
-        unit ===
-            "g"
+        dimension === "weight" &&
+        unit === "g"
     ) {
-
-        return (
-            qty / 1000
-        );
+        return qty / 1000;
     }
 
-
     if (
-        dimension ===
-            "volume" &&
-
-        unit ===
-            "ml"
+        dimension === "volume" &&
+        unit === "ml"
     ) {
-
-        return (
-            qty / 1000
-        );
+        return qty / 1000;
     }
-
 
     return qty;
 }
-
 
 function calculateItemTotal(
     item
@@ -571,131 +518,87 @@ function calculateItemTotal(
             item.qty
         );
 
-
     const price =
         Number(
-
             item.unit_price ??
-
             item.selling_price
         );
 
-
     if (
-        !Number.isFinite(
-            qty
-        ) ||
-
+        !Number.isFinite(qty) ||
         qty <= 0
     ) {
-
         throw new Error(
             "Quantity must be greater than 0."
         );
     }
 
-
     if (
-        !Number.isFinite(
-            price
-        ) ||
-
+        !Number.isFinite(price) ||
         price <= 0
     ) {
-
         throw new Error(
             "Invalid product price."
         );
     }
 
-
     const dimension =
-
         item.unit_type ||
-
         productDimension(
             item,
             item.unit
         );
 
-
     const unit =
-
         normalizeUnit(
             item.unit
         ) ||
-
         defaultUnit(
             dimension
         );
 
-
     let billingQty =
         qty;
 
-
     if (
-        dimension ===
-            "weight" &&
-
-        unit ===
-            "g"
+        dimension === "weight" &&
+        unit === "g"
     ) {
-
         billingQty =
             qty / 1000;
     }
 
-
     if (
-        dimension ===
-            "volume" &&
-
-        unit ===
-            "ml"
+        dimension === "volume" &&
+        unit === "ml"
     ) {
-
         billingQty =
             qty / 1000;
     }
-
 
     item.unit_type =
         dimension;
 
-
     item.unit =
         unit;
 
-
     item.unit_id =
-
         findUnitId(
             unit
         ) ||
-
         item.unit_id ||
-
         null;
-
 
     item.total =
         Number(
             (
                 price *
                 billingQty
-            )
-                .toFixed(
-                    2
-                )
+            ).toFixed(2)
         );
 
-
-    return (
-        item.total
-    );
+    return item.total;
 }
-
 
 function formatQty(
     value
@@ -706,31 +609,20 @@ function formatQty(
             value
         );
 
-
     if (
-        !Number.isFinite(
-            n
-        )
+        !Number.isFinite(n)
     ) {
-
         return String(
             value ||
             ""
         );
     }
 
-
     if (
-        Number.isInteger(
-            n
-        )
+        Number.isInteger(n)
     ) {
-
-        return String(
-            n
-        );
+        return String(n);
     }
-
 
     return n
         .toFixed(3)
@@ -744,7 +636,6 @@ function formatQty(
         );
 }
 
-
 /* =========================================================
    PRODUCT SEARCH
 ========================================================= */
@@ -756,7 +647,6 @@ function buildSearchTokens(
     const tokens =
         new Set();
 
-
     function add(
         value
     ) {
@@ -766,16 +656,13 @@ function buildSearchTokens(
                 value
             );
 
-
         if (!normalized) {
             return;
         }
 
-
         tokens.add(
             normalized
         );
-
 
         normalized
             .split(
@@ -788,7 +675,6 @@ function buildSearchTokens(
                         word.length >=
                         2
                     ) {
-
                         tokens.add(
                             word
                         );
@@ -797,31 +683,25 @@ function buildSearchTokens(
             );
     }
 
-
     add(
         row.product_name
     );
-
 
     add(
         row.brand_name
     );
 
-
     add(
         row.category_name
     );
-
 
     add(
         row.description
     );
 
-
     add(
         row.package_size
     );
-
 
     String(
         row.aliases ||
@@ -841,12 +721,10 @@ function buildSearchTokens(
             add
         );
 
-
     return [
         ...tokens
     ];
 }
-
 
 function isUsableProduct(
     product
@@ -857,11 +735,8 @@ function isUsableProduct(
         product &&
 
         Number(
-
             product.merchant_product_id ||
-
             product.vendor_product_id
-
         ) > 0 &&
 
         normalizeText(
@@ -869,7 +744,6 @@ function isUsableProduct(
         ) !== "" &&
 
         Number.isFinite(
-
             Number(
                 product.selling_price
             )
@@ -881,7 +755,6 @@ function isUsableProduct(
     );
 }
 
-
 function findProduct(
     queryText
 ) {
@@ -891,12 +764,9 @@ function findProduct(
             queryText
         );
 
-
     if (!q) {
-
         return null;
     }
-
 
     const products =
         currentProducts()
@@ -904,62 +774,35 @@ function findProduct(
                 isUsableProduct
             );
 
-
-    /*
-     * Exact product name.
-     */
-
     let found =
         products.find(
             p =>
-
                 normalizeText(
                     p.product_name
-                ) ===
-                q
+                ) === q
         );
 
-
     if (found) {
-
         return found;
     }
-
-
-    /*
-     * Exact alias/token.
-     */
 
     found =
         products.find(
             p =>
-
                 (
                     p.searchTokens ||
                     []
                 )
                     .some(
                         token =>
-
                             token &&
-
-                            token ===
-                            q
+                            token === q
                     )
         );
 
-
     if (found) {
-
         return found;
     }
-
-
-    /*
-     * Partial product name.
-     *
-     * Empty product name is NEVER allowed.
-     */
 
     found =
         products.find(
@@ -970,36 +813,20 @@ function findProduct(
                         p.product_name
                     );
 
-
                 if (!name) {
-
                     return false;
                 }
 
-
                 return (
-
-                    name.includes(
-                        q
-                    ) ||
-
-                    q.includes(
-                        name
-                    )
+                    name.includes(q) ||
+                    q.includes(name)
                 );
             }
         );
 
-
     if (found) {
-
         return found;
     }
-
-
-    /*
-     * Token fallback.
-     */
 
     const words =
         q
@@ -1008,18 +835,14 @@ function findProduct(
             )
             .filter(
                 word =>
-                    word.length >=
-                    2
+                    word.length >= 2
             );
-
 
     let best =
         null;
 
-
     let bestScore =
         0;
-
 
     for (
         const p
@@ -1030,10 +853,8 @@ function findProduct(
             p.searchTokens ||
             [];
 
-
         let score =
             0;
-
 
         for (
             const word
@@ -1045,11 +866,9 @@ function findProduct(
                     word
                 )
             ) {
-
                 score++;
             }
         }
-
 
         if (
             score >
@@ -1059,12 +878,10 @@ function findProduct(
             bestScore =
                 score;
 
-
             best =
                 p;
         }
     }
-
 
     return (
         bestScore > 0
@@ -1072,7 +889,6 @@ function findProduct(
             : null
     );
 }
-
 
 function parseQuantity(
     text
@@ -1082,32 +898,21 @@ function parseQuantity(
         String(
             text ||
             ""
-        )
-            .trim();
-
+        ).trim();
 
     const match =
         original.match(
-
             /(\d+(?:\.\d+)?)\s*(kg|kgs|kilo|kilos|g|gm|gms|gram|grams|ltr|l|lt|litre|litres|liter|liters|ml|pcs|pc|piece|pieces|nos|no|pkt|pk|pkts|packet|pack|packs)?\s*$/i
         );
-
 
     if (!match) {
 
         return {
-
-            qty:
-                1,
-
-            unit:
-                null,
-
-            matchedText:
-                ""
+            qty: 1,
+            unit: null,
+            matchedText: ""
         };
     }
-
 
     return {
 
@@ -1126,7 +931,6 @@ function parseQuantity(
     };
 }
 
-
 function cleanProductText(
     text,
     quantityInfo
@@ -1136,43 +940,30 @@ function cleanProductText(
         String(
             text ||
             ""
-        )
-            .trim();
-
+        ).trim();
 
     const q =
-
         quantityInfo ||
-
         parseQuantity(
             original
         );
 
-
     if (
         !q.matchedText
     ) {
-
-        return (
-            normalizeText(
-                original
-            )
+        return normalizeText(
+            original
         );
     }
 
-
     return normalizeText(
-
         original.slice(
-
             0,
-
             original.length -
             q.matchedText.length
         )
     );
 }
-
 
 function parseSingleOrder(
     text
@@ -1182,63 +973,45 @@ function parseSingleOrder(
         String(
             text ||
             ""
-        )
-            .trim();
-
+        ).trim();
 
     if (!original) {
 
         return {
-
             error:
                 "Empty product"
         };
     }
 
-
     const exact =
         currentProducts()
-
             .filter(
                 isUsableProduct
             )
-
             .find(
                 p =>
-
                     normalizeText(
                         p.product_name
                     ) ===
-
                     normalizeText(
                         original
                     )
             );
 
-
     let q = {
-
-        qty:
-            1,
-
-        unit:
-            null,
-
-        matchedText:
-            ""
+        qty: 1,
+        unit: null,
+        matchedText: ""
     };
-
 
     let productText =
         normalizeText(
             original
         );
 
-
     let product =
         exact ||
         null;
-
 
     if (!product) {
 
@@ -1247,13 +1020,11 @@ function parseSingleOrder(
                 original
             );
 
-
         productText =
             cleanProductText(
                 original,
                 q
             );
-
 
         product =
             findProduct(
@@ -1261,10 +1032,8 @@ function parseSingleOrder(
             );
     }
 
-
     if (
         !product ||
-
         !isUsableProduct(
             product
         )
@@ -1280,29 +1049,22 @@ function parseSingleOrder(
         };
     }
 
-
     const qty =
         Number(
             q.qty ||
             1
         );
 
-
     if (
-        !Number.isFinite(
-            qty
-        ) ||
-
+        !Number.isFinite(qty) ||
         qty <= 0
     ) {
 
         return {
-
             error:
                 `Invalid quantity for ${product.product_name}`
         };
     }
-
 
     const dimension =
         productDimension(
@@ -1310,23 +1072,18 @@ function parseSingleOrder(
             q.unit
         );
 
-
     const unit =
-
         normalizeUnit(
             q.unit
         ) ||
-
         defaultUnit(
             dimension
         );
-
 
     const requestedDimension =
         unitDimension(
             unit
         );
-
 
     const raw =
         normalizeText(
@@ -1334,100 +1091,76 @@ function parseSingleOrder(
             ""
         );
 
-
     const hasWeight =
         /(^|[\/\s])(g|kg|gram|grams|kilogram|kilograms)([\/\s]|$)/i
             .test(raw);
-
 
     const hasVolume =
         /(^|[\/\s])(ml|l|ltr|litre|liter|litres|liters)([\/\s]|$)/i
             .test(raw);
 
-
     const hasCount =
         /(piece|pieces|pcs|packet|pack|pkt|set|pair|count|nos|number)/i
             .test(raw);
 
-
     if (
         requestedDimension ===
-            "weight" &&
-
+        "weight" &&
         hasVolume &&
-
         !hasWeight &&
-
         !hasCount
     ) {
 
         return {
-
             error:
                 `${product.product_name} uses ml/ltr.`
         };
     }
 
-
     if (
         requestedDimension ===
-            "volume" &&
-
+        "volume" &&
         hasWeight &&
-
         !hasVolume &&
-
         !hasCount
     ) {
 
         return {
-
             error:
                 `${product.product_name} uses g/kg.`
         };
     }
 
-
     if (
         requestedDimension !==
-            "count" &&
-
+        "count" &&
         hasCount &&
-
         !hasWeight &&
-
         !hasVolume
     ) {
 
         return {
-
             error:
                 `${product.product_name} is sold by piece/packet.`
         };
     }
-
 
     const item = {
 
         ...product,
 
         vendor_product_id:
-
             product.merchant_product_id ||
-
             product.vendor_product_id,
 
         merchant_product_id:
-
             product.merchant_product_id ||
-
             product.vendor_product_id,
 
         product_name:
             String(
                 product.product_name
-            )
-                .trim(),
+            ).trim(),
 
         unit_price:
             Number(
@@ -1442,23 +1175,18 @@ function parseSingleOrder(
             dimension,
 
         unit_id:
-
             findUnitId(
                 unit
             ) ||
-
             product.unit_id ||
-
             null
     };
-
 
     try {
 
         calculateItemTotal(
             item
         );
-
 
         return item;
     }
@@ -1477,7 +1205,6 @@ function parseSingleOrder(
         };
     }
 }
-
 
 function parseOrderText(
     text
@@ -1501,7 +1228,6 @@ function parseOrderText(
             parseSingleOrder
         );
 }
-
 
 /* =========================================================
    SESSION / CART
@@ -1530,6 +1256,18 @@ function getSession(
                 address:
                     null,
 
+                addressId:
+                    null,
+
+                addressLatitude:
+                    null,
+
+                addressLongitude:
+                    null,
+
+                deliveryDistanceKm:
+                    null,
+
                 orderId:
                     null,
 
@@ -1554,22 +1292,17 @@ function getSession(
         );
     }
 
-
     const session =
         sessions.get(
             key
         );
 
-
     if (
-
         Date.now() -
-
         Number(
             session.lastActivity ||
             0
         ) >
-
         SESSION_TIMEOUT_MS
     ) {
 
@@ -1579,14 +1312,11 @@ function getSession(
         );
     }
 
-
     session.lastActivity =
         Date.now();
 
-
     return session;
 }
-
 
 function resetConversation(
     session,
@@ -1594,48 +1324,69 @@ function resetConversation(
 ) {
 
     const address =
-
         keepAddress
             ? session.address
             : null;
 
+    const addressId =
+        keepAddress
+            ? session.addressId
+            : null;
+
+    const addressLatitude =
+        keepAddress
+            ? session.addressLatitude
+            : null;
+
+    const addressLongitude =
+        keepAddress
+            ? session.addressLongitude
+            : null;
+
+    const deliveryDistanceKm =
+        keepAddress
+            ? session.deliveryDistanceKm
+            : null;
 
     session.status =
         STATES.IDLE;
 
-
     session.cart =
         [];
-
 
     session.address =
         address;
 
+    session.addressId =
+        addressId;
+
+    session.addressLatitude =
+        addressLatitude;
+
+    session.addressLongitude =
+        addressLongitude;
+
+    session.deliveryDistanceKm =
+        deliveryDistanceKm;
 
     session.orderId =
         null;
 
-
     session.orderNumber =
         null;
-
 
     session.orderTotal =
         null;
 
-
     session.editItemNo =
         null;
-
 
     session.paymentProcessing =
         false;
 
-
     session.lastActivity =
         Date.now();
 }
-
 
 function renumberCart(
     session
@@ -1657,7 +1408,6 @@ function renumberCart(
         );
 }
 
-
 function isValidCartItem(
     item
 ) {
@@ -1675,7 +1425,6 @@ function isValidCartItem(
         ) !== "" &&
 
         Number.isFinite(
-
             Number(
                 item.unit_price
             )
@@ -1686,7 +1435,6 @@ function isValidCartItem(
         ) > 0 &&
 
         Number.isFinite(
-
             Number(
                 item.qty
             )
@@ -1697,7 +1445,6 @@ function isValidCartItem(
         ) > 0
     );
 }
-
 
 function cleanInvalidCartItems(
     session
@@ -1712,17 +1459,12 @@ function cleanInvalidCartItems(
                 isValidCartItem
             );
 
-
     renumberCart(
         session
     );
 
-
-    return (
-        session.cart
-    );
+    return session.cart;
 }
-
 
 function mergeSameProduct(
     existing,
@@ -1730,24 +1472,18 @@ function mergeSameProduct(
 ) {
 
     const existingDimension =
-
         existing.unit_type ||
-
         productDimension(
             existing,
             existing.unit
         );
 
-
     const incomingDimension =
-
         incoming.unit_type ||
-
         productDimension(
             incoming,
             incoming.unit
         );
-
 
     if (
         existingDimension !==
@@ -1755,12 +1491,10 @@ function mergeSameProduct(
     ) {
 
         return {
-
             error:
                 `Please use a compatible unit for ${incoming.product_name}.`
         };
     }
-
 
     if (
         existingDimension ===
@@ -1768,53 +1502,38 @@ function mergeSameProduct(
     ) {
 
         const a =
-
             normalizeUnit(
                 existing.unit
-            ) ===
-                "g"
-
+            ) === "g"
                 ? Number(
                     existing.qty
                 ) / 1000
-
                 : Number(
                     existing.qty
                 );
-
 
         const b =
-
             normalizeUnit(
                 incoming.unit
-            ) ===
-                "g"
-
+            ) === "g"
                 ? Number(
                     incoming.qty
                 ) / 1000
-
                 : Number(
                     incoming.qty
                 );
-
 
         existing.qty =
             Number(
                 (
                     a +
                     b
-                )
-                    .toFixed(
-                        4
-                    )
+                ).toFixed(4)
             );
-
 
         existing.unit =
             "kg";
     }
-
 
     else if (
         existingDimension ===
@@ -1822,129 +1541,91 @@ function mergeSameProduct(
     ) {
 
         const a =
-
             normalizeUnit(
                 existing.unit
-            ) ===
-                "ml"
-
+            ) === "ml"
                 ? Number(
                     existing.qty
                 ) / 1000
-
                 : Number(
                     existing.qty
                 );
-
 
         const b =
-
             normalizeUnit(
                 incoming.unit
-            ) ===
-                "ml"
-
+            ) === "ml"
                 ? Number(
                     incoming.qty
                 ) / 1000
-
                 : Number(
                     incoming.qty
                 );
-
 
         existing.qty =
             Number(
                 (
                     a +
                     b
-                )
-                    .toFixed(
-                        4
-                    )
+                ).toFixed(4)
             );
-
 
         existing.unit =
             "ltr";
     }
 
-
     else {
 
         const a =
-
             normalizeUnit(
                 existing.unit
             ) ||
-
             "pcs";
 
-
         const b =
-
             normalizeUnit(
                 incoming.unit
             ) ||
-
             "pcs";
 
-
         if (
-            a !==
-            b
+            a !== b
         ) {
 
             return {
-
                 error:
                     `Please use the same unit for ${incoming.product_name}.`
             };
         }
 
-
         existing.qty =
-
             Number(
                 existing.qty
             ) +
-
             Number(
                 incoming.qty
             );
-
 
         existing.unit =
             a;
     }
 
-
     existing.unit_id =
-
         findUnitId(
             existing.unit
         ) ||
-
         existing.unit_id ||
-
         null;
-
 
     calculateItemTotal(
         existing
     );
 
-
     return {
-
-        ok:
-            true,
-
-        item:
-            existing
+        ok: true,
+        item: existing
     };
 }
-
 
 function addToCart(
     session,
@@ -1955,19 +1636,11 @@ function addToCart(
         session
     );
 
-
     const result = {
-
-        added:
-            [],
-
-        merged:
-            [],
-
-        errors:
-            []
+        added: [],
+        merged: [],
+        errors: []
     };
-
 
     for (
         const item
@@ -1983,31 +1656,24 @@ function addToCart(
 
             result.errors
                 .push(
-
                     item?.error ||
-
                     "Invalid product was not added."
                 );
 
-
             continue;
         }
-
 
         const existing =
             session.cart
                 .find(
                     x =>
-
                         Number(
                             x.vendor_product_id
                         ) ===
-
                         Number(
                             item.vendor_product_id
                         )
                 );
-
 
         if (existing) {
 
@@ -2016,7 +1682,6 @@ function addToCart(
                     existing,
                     item
                 );
-
 
             if (
                 merged.error
@@ -2041,10 +1706,8 @@ function addToCart(
 
             session.cart
                 .push({
-
                     ...item
                 });
-
 
             result.added
                 .push(
@@ -2053,15 +1716,12 @@ function addToCart(
         }
     }
 
-
     renumberCart(
         session
     );
 
-
     return result;
 }
-
 
 function cartOperationNote(
     operation
@@ -2070,16 +1730,13 @@ function cartOperationNote(
     const lines =
         [];
 
-
     if (
         operation.added
             ?.length
     ) {
 
         lines.push(
-
             `➕ Added: ${
-
                 operation.added
                     .map(
                         x =>
@@ -2092,16 +1749,13 @@ function cartOperationNote(
         );
     }
 
-
     if (
         operation.merged
             ?.length
     ) {
 
         lines.push(
-
             `🔄 Quantity increased: ${
-
                 operation.merged
                     .map(
                         x =>
@@ -2114,16 +1768,13 @@ function cartOperationNote(
         );
     }
 
-
     if (
         operation.errors
             ?.length
     ) {
 
         lines.push(
-
             `⚠️ ${
-
                 operation.errors
                     .join(
                         "\n⚠️ "
@@ -2132,12 +1783,10 @@ function cartOperationNote(
         );
     }
 
-
     return lines.join(
         "\n"
     );
 }
-
 
 function buildBill(
     items,
@@ -2153,22 +1802,13 @@ function buildBill(
                 isValidCartItem
             );
 
-
     const lines = [
-
         `🧾 *${title}*`,
-
-        "```",
-
-        "No  Product             Qty   Unit   Price",
-
-        "----------------------------------------------------"
+        ""
     ];
-
 
     let total =
         0;
-
 
     valid.forEach(
         (
@@ -2176,39 +1816,44 @@ function buildBill(
             index
         ) => {
 
-            const name =
-                String(
-                    item.product_name
-                )
-                    .padEnd(
-                        20
-                    )
-                    .slice(
-                        0,
-                        20
-                    );
-
-
             const qty =
                 formatQty(
                     item.qty
-                )
-                    .padEnd(
-                        5
-                    );
-
+                );
 
             const unit =
                 String(
                     item.unit ||
                     ""
+                ).trim();
+
+            const dimension =
+                item.unit_type ||
+                productDimension(
+                    item,
+                    unit
+                );
+
+            const rateUnit =
+                dimension === "weight"
+                    ? "kg"
+                    : dimension === "volume"
+                        ? "ltr"
+                        : (
+                            unit ||
+                            "pcs"
+                        );
+
+            const rate =
+                Number(
+                    item.unit_price ||
+                    0
                 )
-                    .padEnd(
-                        6
+                    .toFixed(
+                        2
                     );
 
-
-            const price =
+            const amount =
                 Number(
                     item.total ||
                     0
@@ -2217,22 +1862,25 @@ function buildBill(
                         2
                     );
 
-
             lines.push(
-
-                `${
-
-                    String(
-                        index +
-                        1
-                    )
-                        .padEnd(
-                            3
-                        )
-
-                } ${name} ${qty} ${unit} ${price}`
+                `*${index + 1}. ${item.product_name}*`
             );
 
+            lines.push(
+                `Qty: ${qty} ${unit}`
+            );
+
+            lines.push(
+                `Rate: ₹${rate} / ${rateUnit}`
+            );
+
+            lines.push(
+                `Amount: *₹${amount}*`
+            );
+
+            lines.push(
+                ""
+            );
 
             total +=
                 Number(
@@ -2242,30 +1890,15 @@ function buildBill(
         }
     );
 
-
     lines.push(
-        "---------------------------------------------------"
+        "━━━━━━━━━━━━━━━━━━"
     );
 
-
     lines.push(
-
-        `Total: ₹ ${
-
-            total.toFixed(
-                2
-            )
-        }`
+        `💰 *Total: ₹${total.toFixed(2)}*`
     );
-
-
-    lines.push(
-        "```"
-    );
-
 
     return {
-
         text:
             lines.join(
                 "\n"
@@ -2280,7 +1913,6 @@ function buildBill(
     };
 }
 
-
 function removeCartItem(
     session,
     itemNo
@@ -2290,28 +1922,23 @@ function removeCartItem(
         session.cart
             .findIndex(
                 x =>
-
                     Number(
                         x.cartId
                     ) ===
-
                     Number(
                         itemNo
                     )
             );
-
 
     if (
         index < 0
     ) {
 
         return {
-
             error:
                 "Item number not found in cart."
         };
     }
-
 
     const [removed] =
         session.cart
@@ -2320,21 +1947,15 @@ function removeCartItem(
                 1
             );
 
-
     renumberCart(
         session
     );
 
-
     return {
-
-        ok:
-            true,
-
+        ok: true,
         removed
     };
 }
-
 
 function editCartItem(
     session,
@@ -2347,123 +1968,89 @@ function editCartItem(
         session.cart
             .find(
                 x =>
-
                     Number(
                         x.cartId
                     ) ===
-
                     Number(
                         itemNo
                     )
             );
 
-
     if (!item) {
 
         return {
-
             error:
                 "Item number not found in cart."
         };
     }
-
 
     const n =
         Number(
             qty
         );
 
-
     if (
-        !Number.isFinite(
-            n
-        ) ||
-
+        !Number.isFinite(n) ||
         n <= 0
     ) {
 
         return {
-
             error:
                 "Quantity must be greater than 0."
         };
     }
 
-
     const nextUnit =
-
         normalizeUnit(
             unit
         ) ||
-
         item.unit;
 
-
     const d1 =
-
         item.unit_type ||
-
         productDimension(
             item,
             item.unit
         );
 
-
     const d2 =
-
         unitDimension(
             nextUnit
         ) ||
-
         d1;
 
-
     if (
-        d1 !==
-        d2
+        d1 !== d2
     ) {
 
         return {
-
             error:
                 `Please use a ${d1} unit for ${item.product_name}.`
         };
     }
 
-
     item.qty =
         n;
-
 
     item.unit =
         nextUnit;
 
-
     item.unit_id =
-
         findUnitId(
             nextUnit
         ) ||
-
         item.unit_id ||
-
         null;
-
 
     calculateItemTotal(
         item
     );
 
-
     return {
-
-        ok:
-            true,
-
+        ok: true,
         item
     };
 }
-
 
 /* =========================================================
    MERCHANT / PRODUCT CATALOG
@@ -2489,16 +2076,13 @@ async function getMerchantByNumber(
             FROM cb_merchant_channels c
 
             INNER JOIN cb_merchant_registration m
-                ON m.merchant_id =
-                   c.merchant_id
+                ON m.merchant_id = c.merchant_id
 
             WHERE c.phone_number_id = ?
 
-              AND c.channel_type =
-                  'whatsapp'
+              AND c.channel_type = 'whatsapp'
 
-              AND c.status =
-                  'active'
+              AND c.status = 'active'
 
               AND m.registration_status
                   IN (
@@ -2515,14 +2099,12 @@ async function getMerchantByNumber(
             ]
         );
 
-
     return (
         rows.length
             ? rows[0]
             : null
     );
 }
-
 
 async function loadMerchantCatalog(
     channel
@@ -2533,35 +2115,28 @@ async function loadMerchantCatalog(
             channel.merchant_id
         );
 
-
     const channelId =
         Number(
             channel.channel_id
         );
 
-
     const cacheKey =
         `${merchantId}:${channelId}`;
-
 
     const cached =
         catalogCache.get(
             cacheKey
         );
 
-
     if (
         cached &&
-
         Date.now() -
-            cached.loadedAt <
-
+        cached.loadedAt <
         CATALOG_CACHE_MS
     ) {
 
         return cached;
     }
-
 
     const productRows =
         await query(
@@ -2632,6 +2207,8 @@ async function loadMerchantCatalog(
                 )
                     AS category_name,
 
+                pi.image_key,
+
                 CONCAT_WS(
                     ';',
 
@@ -2669,6 +2246,35 @@ async function loadMerchantCatalog(
             LEFT JOIN
             (
                 SELECT
+                    merchant_product_id,
+
+                    SUBSTRING_INDEX(
+                        GROUP_CONCAT(
+                            storage_key
+                            ORDER BY
+                                is_primary DESC,
+                                sort_order ASC,
+                                image_id ASC
+                            SEPARATOR '||'
+                        ),
+                        '||',
+                        1
+                    )
+                        AS image_key
+
+                FROM cb_merchant_product_images
+
+                WHERE status =
+                      'active'
+
+                GROUP BY merchant_product_id
+            ) pi
+                ON pi.merchant_product_id =
+                   p.merchant_product_id
+
+            LEFT JOIN
+            (
+                SELECT
                     product_id,
 
                     GROUP_CONCAT(
@@ -2689,8 +2295,7 @@ async function loadMerchantCatalog(
 
               AND p.is_available = 1
 
-              AND p.status =
-                  'active'
+              AND p.status = 'active'
 
               AND TRIM(
                     COALESCE(
@@ -2728,10 +2333,8 @@ async function loadMerchantCatalog(
             ]
         );
 
-
     const products =
         productRows
-
             .map(
                 row => ({
 
@@ -2753,11 +2356,9 @@ async function loadMerchantCatalog(
                         )
                 })
             )
-
             .filter(
                 isUsableProduct
             );
-
 
     const units =
         await query(
@@ -2770,15 +2371,12 @@ async function loadMerchantCatalog(
 
             FROM units
 
-            WHERE status =
-                  'active'
-
+            WHERE status = 'active'
                OR status IS NULL
 
             ORDER BY unit_id
             `
         );
-
 
     const result = {
 
@@ -2792,9 +2390,7 @@ async function loadMerchantCatalog(
             ),
 
         shopName:
-
             channel.store_name ||
-
             "CODE-Bot Store",
 
         registrationStatus:
@@ -2808,22 +2404,17 @@ async function loadMerchantCatalog(
             Date.now()
     };
 
-
     catalogCache.set(
         cacheKey,
         result
     );
 
-
     console.log(
-
         `✅ ${result.shopName}: ${products.length} valid products loaded`
     );
 
-
     return result;
 }
-
 
 /* =========================================================
    CUSTOMER / CONVERSATION / MESSAGE DB
@@ -2837,11 +2428,8 @@ async function ensureCustomer(
         await query(
             `
             SELECT customer_id
-
             FROM customers
-
             WHERE whatsapp_number = ?
-
             LIMIT 1
             `,
             [
@@ -2849,17 +2437,12 @@ async function ensureCustomer(
             ]
         );
 
-
     if (
         rows.length
     ) {
-
-        return (
-            rows[0]
-                .customer_id
-        );
+        return rows[0]
+            .customer_id;
     }
-
 
     try {
 
@@ -2868,7 +2451,6 @@ async function ensureCustomer(
                 `
                 INSERT INTO customers
                     (whatsapp_number)
-
                 VALUES (?)
                 `,
                 [
@@ -2876,10 +2458,8 @@ async function ensureCustomer(
                 ]
             );
 
-
-        return (
-            result.insertId
-        );
+        return result
+            .insertId;
     }
 
     catch (
@@ -2890,20 +2470,15 @@ async function ensureCustomer(
             error.code !==
             "ER_DUP_ENTRY"
         ) {
-
             throw error;
         }
-
 
         rows =
             await query(
                 `
                 SELECT customer_id
-
                 FROM customers
-
                 WHERE whatsapp_number = ?
-
                 LIMIT 1
                 `,
                 [
@@ -2911,22 +2486,16 @@ async function ensureCustomer(
                 ]
             );
 
-
         if (
             rows.length
         ) {
-
-            return (
-                rows[0]
-                    .customer_id
-            );
+            return rows[0]
+                .customer_id;
         }
-
 
         throw error;
     }
 }
-
 
 async function ensureConversation(
     merchantId,
@@ -2947,11 +2516,9 @@ async function ensureConversation(
 
               AND channel_id = ?
 
-              AND status =
-                  'open'
+              AND status = 'open'
 
-            ORDER BY
-                conversation_id DESC
+            ORDER BY conversation_id DESC
 
             LIMIT 1
             `,
@@ -2962,7 +2529,6 @@ async function ensureConversation(
             ]
         );
 
-
     if (
         rows.length
     ) {
@@ -2970,7 +2536,6 @@ async function ensureConversation(
         const id =
             rows[0]
                 .conversation_id;
-
 
         await query(
             `
@@ -2986,10 +2551,8 @@ async function ensureConversation(
             ]
         );
 
-
         return id;
     }
-
 
     const result =
         await query(
@@ -3021,12 +2584,9 @@ async function ensureConversation(
             ]
         );
 
-
-    return (
-        result.insertId
-    );
+    return result
+        .insertId;
 }
-
 
 function conversationKey(
     phoneNumberId,
@@ -3038,7 +2598,6 @@ function conversationKey(
     );
 }
 
-
 function setConversationContext(
     phoneNumberId,
     customerPhone,
@@ -3046,14 +2605,11 @@ function setConversationContext(
 ) {
 
     conversationContexts.set(
-
         conversationKey(
             phoneNumberId,
             customerPhone
         ),
-
         {
-
             conversationId:
                 Number(
                     conversationId
@@ -3062,26 +2618,21 @@ function setConversationContext(
     );
 }
 
-
 function getConversationContext(
     phoneNumberId,
     customerPhone
 ) {
 
     return (
-
         conversationContexts.get(
-
             conversationKey(
                 phoneNumberId,
                 customerPhone
             )
         ) ||
-
         null
     );
 }
-
 
 function inboundText(
     message,
@@ -3091,12 +2642,10 @@ function inboundText(
     if (
         parsedText
     ) {
-
         return String(
             parsedText
         );
     }
-
 
     if (
         message?.type ===
@@ -3104,14 +2653,11 @@ function inboundText(
     ) {
 
         return String(
-
             message.text
                 ?.body ||
-
             ""
         );
     }
-
 
     if (
         message?.type ===
@@ -3119,7 +2665,6 @@ function inboundText(
     ) {
 
         return String(
-
             message
                 .interactive
                 ?.button_reply
@@ -3144,10 +2689,83 @@ function inboundText(
         );
     }
 
+    if (
+        message?.type ===
+        "location"
+    ) {
+
+        const lat =
+            Number(
+                message.location
+                    ?.latitude
+            );
+
+        const lng =
+            Number(
+                message.location
+                    ?.longitude
+            );
+
+        const address =
+            String(
+                message.location
+                    ?.address ||
+
+                message.location
+                    ?.name ||
+
+                ""
+            ).trim();
+
+        if (
+            Number.isFinite(lat) &&
+            Number.isFinite(lng)
+        ) {
+
+            return (
+                `Location: ${lat}, ${lng}${
+                    address
+                        ? ` | ${address}`
+                        : ""
+                }`
+            );
+        }
+    }
 
     return "";
 }
 
+async function isMessageAlreadySaved(
+    externalMessageId
+) {
+
+    if (
+        !externalMessageId
+    ) {
+        return false;
+    }
+
+    const rows =
+        await query(
+            `
+            SELECT message_id
+
+            FROM cb_messages
+
+            WHERE external_message_id = ?
+
+            LIMIT 1
+            `,
+            [
+                externalMessageId
+            ]
+        );
+
+    return (
+        rows.length >
+        0
+    );
+}
 
 async function claimInboundMessage(
     conversationId,
@@ -3156,53 +2774,28 @@ async function claimInboundMessage(
 ) {
 
     const providerTimestamp =
-
         message?.timestamp
-
             ? new Date(
                 Number(
                     message.timestamp
                 ) *
                 1000
             )
-
             : new Date();
-
-
-    /*
-     * external_message_id is UNIQUE.
-     *
-     * INSERT IGNORE means:
-     *
-     * New Meta message:
-     * affectedRows = 1
-     *
-     * Duplicate/retry:
-     * affectedRows = 0
-     */
 
     const result =
         await query(
             `
-            INSERT IGNORE
-            INTO cb_messages
+            INSERT IGNORE INTO cb_messages
             (
                 conversation_id,
-
                 external_message_id,
-
                 reply_to_external_message_id,
-
                 direction,
-
                 message_type,
-
                 message_text,
-
                 payload_json,
-
                 provider_status,
-
                 provider_timestamp
             )
 
@@ -3225,7 +2818,8 @@ async function claimInboundMessage(
                 message?.id ||
                 null,
 
-                message?.context?.id ||
+                message?.context
+                    ?.id ||
                 null,
 
                 message?.type ||
@@ -3246,7 +2840,6 @@ async function claimInboundMessage(
             ]
         );
 
-
     await query(
         `
         UPDATE cb_conversations
@@ -3261,24 +2854,19 @@ async function claimInboundMessage(
         ]
     );
 
-
     if (
         !message?.id
     ) {
-
         return true;
     }
 
-
     return (
-
         Number(
             result.affectedRows ||
             0
         ) === 1
     );
 }
-
 
 async function saveOutboundMessage(
     conversationId,
@@ -3289,32 +2877,22 @@ async function saveOutboundMessage(
 ) {
 
     const externalId =
-
         response?.data
             ?.messages?.[0]
             ?.id ||
-
         null;
-
 
     await query(
         `
         INSERT INTO cb_messages
         (
             conversation_id,
-
             external_message_id,
-
             direction,
-
             message_type,
-
             message_text,
-
             payload_json,
-
             provider_status,
-
             sent_at
         )
 
@@ -3376,7 +2954,6 @@ async function saveOutboundMessage(
     );
 }
 
-
 async function updateMessageStatus(
     status
 ) {
@@ -3384,49 +2961,36 @@ async function updateMessageStatus(
     const id =
         status?.id;
 
-
     const state =
         String(
             status?.status ||
             ""
         );
 
-
     if (
         !id ||
         !state
     ) {
-
         return;
     }
 
-
     const when =
-
         status?.timestamp
-
             ? new Date(
                 Number(
                     status.timestamp
                 ) *
                 1000
             )
-
             : new Date();
 
-
     const error =
-
         Array.isArray(
             status?.errors
         ) &&
-
         status.errors.length
-
             ? status.errors[0]
-
             : null;
-
 
     await query(
         `
@@ -3476,43 +3040,32 @@ async function updateMessageStatus(
         [
             state,
 
-            state ===
-                "delivered"
-
+            state === "delivered"
                 ? when
                 : null,
 
-            state ===
-                "read"
-
+            state === "read"
                 ? when
                 : null,
 
-            state ===
-                "failed"
-
+            state === "failed"
                 ? when
                 : null,
 
             error?.code
-
                 ? String(
                     error.code
                 )
-
                 : null,
 
             error?.message ||
-
             error?.title ||
-
             null,
 
             id
         ]
     );
 }
-
 
 /* =========================================================
    WHATSAPP SEND
@@ -3526,12 +3079,10 @@ async function sendWhatsApp(
 ) {
 
     if (!TOKEN) {
-
         throw new Error(
             "TOKEN missing in .env"
         );
     }
-
 
     const data = {
 
@@ -3543,18 +3094,12 @@ async function sendWhatsApp(
         ...payload
     };
 
-
     const response =
         await axios.post(
-
             `https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`,
-
             data,
-
             {
-
                 headers: {
-
                     Authorization:
                         `Bearer ${TOKEN}`,
 
@@ -3567,7 +3112,6 @@ async function sendWhatsApp(
             }
         );
 
-
     try {
 
         const context =
@@ -3576,14 +3120,12 @@ async function sendWhatsApp(
                 to
             );
 
-
         if (
             context
                 ?.conversationId
         ) {
 
             await saveOutboundMessage(
-
                 context
                     .conversationId,
 
@@ -3604,17 +3146,13 @@ async function sendWhatsApp(
     ) {
 
         console.error(
-
             "Outbound DB save warning:",
-
             error.message
         );
     }
 
-
     return response;
 }
-
 
 function sendText(
     phoneNumberId,
@@ -3623,35 +3161,202 @@ function sendText(
 ) {
 
     return sendWhatsApp(
-
         phoneNumberId,
-
         to,
-
         {
-
             type:
                 "text",
 
             text: {
-
                 body:
                     String(
                         text
+                    ).slice(
+                        0,
+                        4096
                     )
-                        .slice(
-                            0,
-                            4096
-                        )
             }
         },
-
         String(
             text
         )
     );
 }
 
+function getPublicMediaUrl(
+    storageKey
+) {
+
+    const key =
+        String(
+            storageKey ||
+            ""
+        ).trim();
+
+    if (!key) {
+        return null;
+    }
+
+    if (
+        /^https?:\/\//i.test(
+            key
+        )
+    ) {
+        return key;
+    }
+
+    if (
+        !PUBLIC_BASE_URL
+    ) {
+        return null;
+    }
+
+    return (
+        `${PUBLIC_BASE_URL}/${key.replace(/^\/+/, "")}`
+    );
+}
+
+async function sendImage(
+    phoneNumberId,
+    to,
+    imageUrl,
+    caption = ""
+) {
+
+    const url =
+        String(
+            imageUrl ||
+            ""
+        ).trim();
+
+    if (!url) {
+        return null;
+    }
+
+    return sendWhatsApp(
+        phoneNumberId,
+        to,
+        {
+            type:
+                "image",
+
+            image: {
+                link:
+                    url,
+
+                caption:
+                    String(
+                        caption ||
+                        ""
+                    ).slice(
+                        0,
+                        1024
+                    )
+            }
+        },
+        String(
+            caption ||
+            ""
+        )
+    );
+}
+
+async function sendProductImages(
+    phoneNumberId,
+    from,
+    items
+) {
+
+    const unique =
+        [];
+
+    const seen =
+        new Set();
+
+    for (
+        const item
+        of items ||
+        []
+    ) {
+
+        if (
+            !isValidCartItem(
+                item
+            )
+        ) {
+            continue;
+        }
+
+        const id =
+            Number(
+                item.vendor_product_id
+            );
+
+        if (
+            seen.has(
+                id
+            )
+        ) {
+            continue;
+        }
+
+        seen.add(
+            id
+        );
+
+        if (
+            item.image_key
+        ) {
+
+            unique.push(
+                item
+            );
+        }
+
+        if (
+            unique.length >=
+            3
+        ) {
+            break;
+        }
+    }
+
+    for (
+        const item
+        of unique
+    ) {
+
+        const imageUrl =
+            getPublicMediaUrl(
+                item.image_key
+            );
+
+        if (!imageUrl) {
+            continue;
+        }
+
+        try {
+
+            await sendImage(
+                phoneNumberId,
+                from,
+                imageUrl,
+                `🛍️ *${item.product_name}*\n₹${Number(item.selling_price).toFixed(2)}`
+            );
+        }
+
+        catch (
+            error
+        ) {
+
+            console.warn(
+                `⚠️ Product image could not be sent for ${item.product_name}:`,
+                error.response?.data ||
+                error.message
+            );
+        }
+    }
+}
 
 function sendButtons(
     phoneNumberId,
@@ -3671,12 +3376,10 @@ function sendButtons(
             )
             .map(
                 button => ({
-
                     type:
                         "reply",
 
                     reply: {
-
                         id:
                             String(
                                 button.id
@@ -3685,61 +3388,49 @@ function sendButtons(
                         title:
                             String(
                                 button.title
+                            ).slice(
+                                0,
+                                20
                             )
-                                .slice(
-                                    0,
-                                    20
-                                )
                     }
                 })
             );
 
-
     return sendWhatsApp(
-
         phoneNumberId,
-
         to,
-
         {
-
             type:
                 "interactive",
 
             interactive: {
-
                 type:
                     "button",
 
                 body: {
-
                     text:
                         String(
                             text
+                        ).slice(
+                            0,
+                            1024
                         )
-                            .slice(
-                                0,
-                                1024
-                            )
                 },
 
                 action: {
-
                     buttons:
                         safeButtons
                 }
             }
         },
-
         String(
             text
         )
     );
 }
 
-
 /* =========================================================
-   ADDRESS
+   ADDRESS / DISTANCE
 ========================================================= */
 
 async function getAddress(
@@ -3753,9 +3444,16 @@ async function getAddress(
                 id,
                 address,
                 landmark,
+                latitude,
+                longitude,
+                name,
+                phone,
                 city,
                 state,
-                pincode
+                pincode,
+                country_id,
+                state_id,
+                is_default
 
             FROM customer_address
 
@@ -3772,6 +3470,49 @@ async function getAddress(
             ]
         );
 
+    return (
+        rows.length
+            ? rows[0]
+            : null
+    );
+}
+
+async function getAddressById(
+    customerId,
+    addressId
+) {
+
+    const rows =
+        await query(
+            `
+            SELECT
+                id,
+                address,
+                landmark,
+                latitude,
+                longitude,
+                name,
+                phone,
+                city,
+                state,
+                pincode,
+                country_id,
+                state_id,
+                is_default
+
+            FROM customer_address
+
+            WHERE customer_id = ?
+
+              AND id = ?
+
+            LIMIT 1
+            `,
+            [
+                customerId,
+                addressId
+            ]
+        );
 
     return (
         rows.length
@@ -3780,12 +3521,15 @@ async function getAddress(
     );
 }
 
-
 async function saveAddress(
     customerId,
     from,
-    address
+    addressData
 ) {
+
+    const data =
+        addressData ||
+        {};
 
     await query(
         `
@@ -3800,7 +3544,6 @@ async function saveAddress(
         ]
     );
 
-
     const result =
         await query(
             `
@@ -3809,6 +3552,14 @@ async function saveAddress(
                 customer_id,
                 user_number,
                 address,
+                landmark,
+                latitude,
+                longitude,
+                name,
+                phone,
+                city,
+                state,
+                pincode,
                 is_default
             )
 
@@ -3817,34 +3568,976 @@ async function saveAddress(
                 ?,
                 ?,
                 ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
+                ?,
                 1
             )
             `,
             [
                 customerId,
+
                 from,
-                address
+
+                data.address,
+
+                data.landmark ||
+                null,
+
+                data.latitude ??
+                null,
+
+                data.longitude ??
+                null,
+
+                data.name ||
+                null,
+
+                data.phone ||
+                from,
+
+                data.city ||
+                null,
+
+                data.state ||
+                null,
+
+                data.pincode ||
+                null
             ]
         );
 
+    return result
+        .insertId;
+}
 
-    return (
-        result.insertId
+async function updateAddressCoordinates(
+    addressId,
+    geo
+) {
+
+    await query(
+        `
+        UPDATE customer_address
+
+        SET
+            latitude = ?,
+
+            longitude = ?,
+
+            city =
+                COALESCE(
+                    ?,
+                    city
+                ),
+
+            state =
+                COALESCE(
+                    ?,
+                    state
+                ),
+
+            pincode =
+                COALESCE(
+                    ?,
+                    pincode
+                )
+
+        WHERE id = ?
+        `,
+        [
+            geo.latitude,
+
+            geo.longitude,
+
+            geo.city ||
+            null,
+
+            geo.state ||
+            null,
+
+            geo.pincode ||
+            null,
+
+            addressId
+        ]
     );
 }
 
+async function getMerchantDeliveryProfile(
+    merchantId
+) {
 
-/* =========================================================
-   DISPLAY FLOW
-========================================================= */
+    const rows =
+        await query(
+            `
+            SELECT
+                ma.address_id,
 
-function welcomeMessage() {
+                ma.address_line1,
+
+                ma.address_line2,
+
+                ma.landmark,
+
+                ma.city,
+
+                ma.state,
+
+                ma.pincode,
+
+                ma.country,
+
+                ma.latitude,
+
+                ma.longitude,
+
+                bg.max_delivery_distance_km
+
+            FROM cb_merchant_registration mr
+
+            LEFT JOIN business_types bt
+                ON bt.business_type_id =
+                   mr.business_type_id
+
+            LEFT JOIN cb_business_groups bg
+                ON bg.business_group_id =
+                   bt.business_group_id
+
+               AND bg.status =
+                   'active'
+
+            LEFT JOIN cb_merchant_addresses ma
+                ON ma.merchant_id =
+                   mr.merchant_id
+
+               AND ma.address_type =
+                   'business'
+
+               AND ma.is_primary =
+                   1
+
+            WHERE mr.merchant_id = ?
+
+            ORDER BY
+                ma.address_id DESC
+
+            LIMIT 1
+            `,
+            [
+                merchantId
+            ]
+        );
+
+    if (
+        !rows.length
+    ) {
+
+        throw new Error(
+            "Merchant delivery address not found."
+        );
+    }
+
+    const row =
+        rows[0];
+
+    const latitude =
+        Number(
+            row.latitude
+        );
+
+    const longitude =
+        Number(
+            row.longitude
+        );
+
+    const maxDistanceKm =
+        Number(
+            row.max_delivery_distance_km
+        );
+
+    if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+    ) {
+
+        throw new Error(
+            "Merchant latitude/longitude is missing in cb_merchant_addresses."
+        );
+    }
+
+    return {
+
+        ...row,
+
+        latitude,
+
+        longitude,
+
+        maxDistanceKm:
+            Number.isFinite(
+                maxDistanceKm
+            ) &&
+            maxDistanceKm > 0
+                ? maxDistanceKm
+                : null
+    };
+}
+
+function addressComponent(
+    components,
+    type
+) {
+
+    const part =
+        (
+            components ||
+            []
+        )
+            .find(
+                x =>
+                    (
+                        x.types ||
+                        []
+                    )
+                        .includes(
+                            type
+                        )
+            );
 
     return (
+        part
+            ? part.long_name
+            : null
+    );
+}
 
-        `🌾🌟 *Welcome!* to *${currentShopName()}* 🌟🌾\n` +
+async function geocodeAddress(
+    addressText
+) {
 
-        `• Powered by *CODE Bot*\n\n` +
+    const address =
+        String(
+            addressText ||
+            ""
+        ).trim();
+
+    if (!address) {
+
+        throw new Error(
+            "Address is empty."
+        );
+    }
+
+    if (
+        !GOOGLE_MAPS_API_KEY
+    ) {
+
+        throw new Error(
+            "GOOGLE_MAPS_API_KEY is missing. Add it in .env, or send a WhatsApp location pin."
+        );
+    }
+
+    const response =
+        await axios.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            {
+                params: {
+                    address,
+                    key:
+                        GOOGLE_MAPS_API_KEY,
+                    region:
+                        "in"
+                },
+
+                timeout:
+                    15000
+            }
+        );
+
+    const payload =
+        response.data ||
+        {};
+
+    if (
+        payload.status !==
+        "OK" ||
+        !payload.results
+            ?.length
+    ) {
+
+        throw new Error(
+            `Address could not be located (${payload.status || "UNKNOWN"}).`
+        );
+    }
+
+    const result =
+        payload.results[0];
+
+    const location =
+        result.geometry
+            ?.location ||
+        {};
+
+    const latitude =
+        Number(
+            location.lat
+        );
+
+    const longitude =
+        Number(
+            location.lng
+        );
+
+    if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+    ) {
+
+        throw new Error(
+            "Google Maps did not return valid coordinates for this address."
+        );
+    }
+
+    return {
+
+        address:
+            result.formatted_address ||
+            address,
+
+        latitude,
+
+        longitude,
+
+        city:
+            addressComponent(
+                result.address_components,
+                "locality"
+            ) ||
+
+            addressComponent(
+                result.address_components,
+                "administrative_area_level_2"
+            ),
+
+        state:
+            addressComponent(
+                result.address_components,
+                "administrative_area_level_1"
+            ),
+
+        pincode:
+            addressComponent(
+                result.address_components,
+                "postal_code"
+            )
+    };
+}
+
+async function reverseGeocodeCoordinates(
+    latitude,
+    longitude
+) {
+
+    const lat =
+        Number(
+            latitude
+        );
+
+    const lng =
+        Number(
+            longitude
+        );
+
+    if (
+        !Number.isFinite(
+            lat
+        ) ||
+        !Number.isFinite(
+            lng
+        )
+    ) {
+
+        throw new Error(
+            "Invalid latitude/longitude."
+        );
+    }
+
+    if (
+        !GOOGLE_MAPS_API_KEY
+    ) {
+
+        return {
+            address:
+                `Pinned location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+
+            latitude:
+                lat,
+
+            longitude:
+                lng,
+
+            city:
+                null,
+
+            state:
+                null,
+
+            pincode:
+                null
+        };
+    }
+
+    const response =
+        await axios.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            {
+                params: {
+                    latlng:
+                        `${lat},${lng}`,
+
+                    key:
+                        GOOGLE_MAPS_API_KEY
+                },
+
+                timeout:
+                    15000
+            }
+        );
+
+    const payload =
+        response.data ||
+        {};
+
+    if (
+        payload.status !==
+        "OK" ||
+        !payload.results
+            ?.length
+    ) {
+
+        return {
+            address:
+                `Pinned location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+
+            latitude:
+                lat,
+
+            longitude:
+                lng,
+
+            city:
+                null,
+
+            state:
+                null,
+
+            pincode:
+                null
+        };
+    }
+
+    const result =
+        payload.results[0];
+
+    return {
+        address:
+            result.formatted_address ||
+            `Pinned location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
+
+        latitude:
+            lat,
+
+        longitude:
+            lng,
+
+        city:
+            addressComponent(
+                result.address_components,
+                "locality"
+            ) ||
+
+            addressComponent(
+                result.address_components,
+                "administrative_area_level_2"
+            ),
+
+        state:
+            addressComponent(
+                result.address_components,
+                "administrative_area_level_1"
+            ),
+
+        pincode:
+            addressComponent(
+                result.address_components,
+                "postal_code"
+            )
+    };
+}
+
+function haversineDistanceKm(
+    lat1,
+    lon1,
+    lat2,
+    lon2
+) {
+
+    const toRad =
+        value =>
+            Number(
+                value
+            ) *
+            Math.PI /
+            180;
+
+    const earthRadiusKm =
+        6371;
+
+    const dLat =
+        toRad(
+            lat2 -
+            lat1
+        );
+
+    const dLon =
+        toRad(
+            lon2 -
+            lon1
+        );
+
+    const a =
+        Math.sin(
+            dLat /
+            2
+        ) *
+        Math.sin(
+            dLat /
+            2
+        ) +
+
+        Math.cos(
+            toRad(
+                lat1
+            )
+        ) *
+
+        Math.cos(
+            toRad(
+                lat2
+            )
+        ) *
+
+        Math.sin(
+            dLon /
+            2
+        ) *
+
+        Math.sin(
+            dLon /
+            2
+        );
+
+    const c =
+        2 *
+        Math.atan2(
+            Math.sqrt(a),
+            Math.sqrt(
+                1 -
+                a
+            )
+        );
+
+    return (
+        earthRadiusKm *
+        c
+    );
+}
+
+async function validateDeliveryDistance(
+    addressData
+) {
+
+    const profile =
+        await getMerchantDeliveryProfile(
+            currentMerchantId()
+        );
+
+    const customerLat =
+        Number(
+            addressData.latitude
+        );
+
+    const customerLng =
+        Number(
+            addressData.longitude
+        );
+
+    if (
+        !Number.isFinite(
+            customerLat
+        ) ||
+        !Number.isFinite(
+            customerLng
+        )
+    ) {
+
+        throw new Error(
+            "Customer latitude/longitude is missing."
+        );
+    }
+
+    const distanceKm =
+        haversineDistanceKm(
+            profile.latitude,
+            profile.longitude,
+            customerLat,
+            customerLng
+        );
+
+    const withinRange =
+        profile.maxDistanceKm == null ||
+        distanceKm <=
+        profile.maxDistanceKm;
+
+    return {
+
+        withinRange,
+
+        distanceKm:
+            Number(
+                distanceKm
+                    .toFixed(
+                        2
+                    )
+            ),
+
+        maxDistanceKm:
+            profile.maxDistanceKm,
+
+        merchantLatitude:
+            profile.latitude,
+
+        merchantLongitude:
+            profile.longitude
+    };
+}
+
+async function prepareSavedAddressForDistance(
+    savedAddress
+) {
+
+    if (
+        !savedAddress
+    ) {
+        return null;
+    }
+
+    let latitude =
+        Number(
+            savedAddress.latitude
+        );
+
+    let longitude =
+        Number(
+            savedAddress.longitude
+        );
+
+    let geo =
+        null;
+
+    if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude)
+    ) {
+
+        geo =
+            await geocodeAddress(
+                savedAddress.address
+            );
+
+        latitude =
+            geo.latitude;
+
+        longitude =
+            geo.longitude;
+
+        await updateAddressCoordinates(
+            savedAddress.id,
+            geo
+        );
+    }
+
+    return {
+
+        ...savedAddress,
+
+        address:
+            geo?.address ||
+            savedAddress.address,
+
+        latitude,
+
+        longitude,
+
+        city:
+            geo?.city ||
+            savedAddress.city ||
+            null,
+
+        state:
+            geo?.state ||
+            savedAddress.state ||
+            null,
+
+        pincode:
+            geo?.pincode ||
+            savedAddress.pincode ||
+            null
+    };
+}
+
+function setSessionAddress(
+    session,
+    addressRow,
+    distanceInfo
+) {
+
+    session.address =
+        addressRow.address;
+
+    session.addressId =
+        addressRow.id ||
+        null;
+
+    session.addressLatitude =
+        Number(
+            addressRow.latitude
+        );
+
+    session.addressLongitude =
+        Number(
+            addressRow.longitude
+        );
+
+    session.deliveryDistanceKm =
+        distanceInfo
+            ?.distanceKm ??
+        null;
+}
+
+async function askAddressChoice(
+    phoneNumberId,
+    from,
+    session,
+    customerId
+) {
+
+    cleanInvalidCartItems(
+        session
+    );
+
+    if (
+        !session.cart.length
+    ) {
+
+        session.status =
+            STATES.IDLE;
+
+        await sendText(
+            phoneNumberId,
+            from,
+            "🛒 Your cart is empty."
+        );
+
+        return;
+    }
+
+    const savedAddress =
+        await getAddress(
+            customerId
+        );
+
+    if (
+        !savedAddress
+    ) {
+
+        session.status =
+            STATES.AWAITING_ADDRESS;
+
+        await sendText(
+            phoneNumberId,
+            from,
+            "📍 *Delivery Address*\n\n" +
+            "No previous address is saved.\n\n" +
+            "Please send your complete current address, or share your WhatsApp location pin."
+        );
+
+        return;
+    }
+
+    session.status =
+        STATES.AWAITING_ADDRESS_CHOICE;
+
+    await sendButtons(
+        phoneNumberId,
+        from,
+        `📍 *Delivery Address*\n\nPrevious address:\n${savedAddress.address}\n\nWhich address do you want to use for this order?`,
+        [
+            {
+                id:
+                    "USE_PREVIOUS_ADDRESS",
+
+                title:
+                    "🏠 Previous Address"
+            },
+            {
+                id:
+                    "USE_CURRENT_ADDRESS",
+
+                title:
+                    "📍 Current Address"
+            }
+        ]
+    );
+}
+
+async function getMerchantWelcomeLocation(
+    merchantId
+) {
+
+    const rows =
+        await query(
+            `
+            SELECT
+                address_line1,
+                address_line2,
+                landmark,
+                city,
+                state
+
+            FROM cb_merchant_addresses
+
+            WHERE merchant_id = ?
+
+              AND address_type =
+                  'business'
+
+            ORDER BY
+                is_primary DESC,
+                address_id DESC
+
+            LIMIT 1
+            `,
+            [
+                merchantId
+            ]
+        );
+
+    if (
+        !rows.length
+    ) {
+
+        return {
+            street:
+                "",
+            city:
+                ""
+        };
+    }
+
+    const row =
+        rows[0];
+
+    const firstLine =
+        String(
+            row.address_line1 ||
+            ""
+        )
+            .split(
+                /\r?\n/
+            )
+            .map(
+                value =>
+                    value.trim()
+            )
+            .filter(
+                Boolean
+            )[0] ||
+        "";
+
+    const street =
+        String(
+            firstLine ||
+            row.address_line2 ||
+            row.landmark ||
+            ""
+        ).trim();
+
+    const rawCity =
+        String(
+            row.city ||
+            ""
+        ).trim();
+
+    const city =
+        rawCity
+            ? rawCity
+                .toLowerCase()
+                .replace(
+                    /\b\w/g,
+                    letter =>
+                        letter.toUpperCase()
+                )
+            : "";
+
+    return {
+        street,
+        city
+    };
+}
+
+function welcomeMessage(
+    location = {}
+) {
+
+    const street =
+        String(
+            location.street ||
+            ""
+        ).trim();
+
+    const city =
+        String(
+            location.city ||
+            ""
+        ).trim();
+
+    const locationLine =
+        [
+            street,
+            city
+        ]
+            .filter(
+                Boolean
+            )
+            .join(
+                ", "
+            );
+
+    return (
+        `*Welcome* to *${currentShopName()}*\n` +
+
+        (
+            locationLine
+                ? `📍 ${locationLine}\n\n`
+                : `\n`
+        ) +
 
         `🛒 Thank you for choosing us for your everyday needs.\n\n` +
 
@@ -3854,14 +4547,94 @@ function welcomeMessage() {
 
         `• Example: *Whole Wheat Atta 5 Kg*\n\n` +
 
-        `• You can also type just the product name.\n` +
+        `• You can also type just the product name or items separated by a comma.\n\n` +
 
-        `• Multiple items: use comma.\n\n` +
+        `*Units*: kg, g, pcs, ml, ltr, pkt\n\n` +
 
-        `🔢 *Units*: kg, g, pcs, ml, ltr, pkt`
+        `*The Street Smart Operating System*\n` +
+
+        `*Powered By CODE-Bot 2080*\n` +
+
+        `*A Product of 2080 Technologies Private Limited*`
     );
 }
 
+async function sendWelcomeMessage(
+    phoneNumberId,
+    from
+) {
+
+    let location = {
+        street:
+            "",
+        city:
+            ""
+    };
+
+    try {
+
+        location =
+            await getMerchantWelcomeLocation(
+                currentMerchantId()
+            );
+    }
+
+    catch (
+        error
+    ) {
+
+        console.warn(
+            "⚠️ Merchant welcome location warning:",
+            error.message
+        );
+    }
+
+    const message =
+        welcomeMessage(
+            location
+        );
+
+    const logoUrl =
+        currentMerchantLogoUrl();
+
+    if (
+        logoUrl
+    ) {
+
+        try {
+
+            await sendImage(
+                phoneNumberId,
+                from,
+                logoUrl,
+                message
+            );
+
+            return;
+        }
+
+        catch (
+            error
+        ) {
+
+            console.warn(
+                "⚠️ Merchant logo could not be sent; using text welcome:",
+                error.response?.data ||
+                error.message
+            );
+        }
+    }
+
+    await sendText(
+        phoneNumberId,
+        from,
+        message
+    );
+}
+
+/* =========================================================
+   DISPLAY FLOW
+========================================================= */
 
 async function sendPreOrderBill(
     phoneNumberId,
@@ -3874,7 +4647,6 @@ async function sendPreOrderBill(
         session
     );
 
-
     if (
         !session.cart.length
     ) {
@@ -3882,24 +4654,16 @@ async function sendPreOrderBill(
         session.status =
             STATES.IDLE;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "❌ No valid product has been added yet.\n\n" +
-
             "Please type a product name.\n" +
-
             "Example: *Cake 1 pcs*"
         );
 
-
         return;
     }
-
 
     const bill =
         buildBill(
@@ -3907,10 +4671,8 @@ async function sendPreOrderBill(
             "Pre Order Bill"
         );
 
-
     let body =
         `🏪 *${currentShopName()}*\n\n`;
-
 
     if (note) {
 
@@ -3918,51 +4680,67 @@ async function sendPreOrderBill(
             `${note}\n\n`;
     }
 
-
     body +=
         bill.text;
 
+    const buttons = [
+        {
+            id:
+                "ADD_MORE_ITEMS",
 
-    await sendButtons(
+            title:
+                "➕ More Item"
+        },
 
-        phoneNumberId,
+        {
+            id:
+                "EDIT_ITEM",
 
-        from,
+            title:
+                "✏️ Edit Item"
+        },
 
-        body,
+        {
+            id:
+                "GENERATE_FINAL_BILL",
 
-        [
-            {
-                id:
-                    "ADD_MORE_ITEMS",
+            title:
+                "✅ Confirm"
+        }
+    ];
 
-                title:
-                    "➕ More Item"
-            },
+    if (
+        body.length >
+        900
+    ) {
 
-            {
-                id:
-                    "EDIT_ITEM",
+        await sendText(
+            phoneNumberId,
+            from,
+            body
+        );
 
-                title:
-                    "✏️ Edit Item"
-            },
+        await sendButtons(
+            phoneNumberId,
+            from,
+            `🛒 *Cart Total: ₹${bill.total.toFixed(2)}*\n\nWhat would you like to do?`,
+            buttons
+        );
+    }
 
-            {
-                id:
-                    "GENERATE_FINAL_BILL",
+    else {
 
-                title:
-                    "✅ Confirm"
-            }
-        ]
-    );
-
+        await sendButtons(
+            phoneNumberId,
+            from,
+            body,
+            buttons
+        );
+    }
 
     session.status =
         STATES.PREORDER;
 }
-
 
 async function sendEditMenu(
     phoneNumberId,
@@ -3974,7 +4752,6 @@ async function sendEditMenu(
         session
     );
 
-
     if (
         !session.cart.length
     ) {
@@ -3982,57 +4759,40 @@ async function sendEditMenu(
         session.status =
             STATES.IDLE;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "🛒 Your cart is empty."
         );
-
 
         return;
     }
 
-
     let body =
-
         "✏️ *Edit Item*\n\n" +
-
         "Please type the item number you want to edit.\n\n";
-
 
     session.cart
         .forEach(
             item => {
 
                 body +=
-
                     `${item.cartId}. ${item.product_name} - ${formatQty(item.qty)} ${item.unit}\n`;
             }
         );
 
-
     body +=
         "\nExample: *1*";
-
 
     session.status =
         STATES.AWAITING_EDIT;
 
-
     await sendText(
-
         phoneNumberId,
-
         from,
-
         body
     );
 }
-
 
 async function sendEditAction(
     phoneNumberId,
@@ -4041,11 +4801,8 @@ async function sendEditAction(
 ) {
 
     await sendButtons(
-
         phoneNumberId,
-
         from,
-
         `✏️ Editing item ${item.cartId}\n\n` +
 
         `Product: *${item.product_name}*\n` +
@@ -4053,7 +4810,6 @@ async function sendEditAction(
         `Current Quantity: *${formatQty(item.qty)} ${item.unit}*\n\n` +
 
         `Choose what you want to do:`,
-
         [
             {
                 id:
@@ -4082,18 +4838,15 @@ async function sendEditAction(
     );
 }
 
-
 async function sendFinalBill(
     phoneNumberId,
     from,
-    session,
-    customerId
+    session
 ) {
 
     cleanInvalidCartItems(
         session
     );
-
 
     if (
         !session.cart.length
@@ -4102,22 +4855,40 @@ async function sendFinalBill(
         session.status =
             STATES.IDLE;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "❌ No valid product is available to generate the final bill.\n\n" +
-
             "Type *Chacha* to start again."
         );
-
 
         return;
     }
 
+    if (
+        !session.address ||
+
+        !Number.isFinite(
+            Number(
+                session.addressLatitude
+            )
+        ) ||
+
+        !Number.isFinite(
+            Number(
+                session.addressLongitude
+            )
+        )
+    ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+            "📍 Please select or enter a delivery address before payment."
+        );
+
+        return;
+    }
 
     const bill =
         buildBill(
@@ -4125,93 +4896,69 @@ async function sendFinalBill(
             "Final Bill"
         );
 
-
-    const savedAddress =
-        await getAddress(
-            customerId
-        );
-
-
-    if (
-        !session.address &&
-        savedAddress
-    ) {
-
-        session.address =
-            savedAddress.address;
-    }
-
-
     let body =
-
-        `🏪 *${currentShopName()}*\n\n${bill.text}`;
-
+        `🏪 *${currentShopName()}*\n\n${bill.text}` +
+        `\n\n📍 *Delivery Address*\n${session.address}`;
 
     if (
-        session.address
+        Number.isFinite(
+            Number(
+                session.deliveryDistanceKm
+            )
+        )
     ) {
 
         body +=
+            `\n\n📏 Distance from store: *${Number(session.deliveryDistanceKm).toFixed(2)} km*`;
+    }
 
-            `\n📍 *Delivery Address:*\n${session.address}\n\n` +
+    body +=
+        "\n🚚 Address is within the delivery area.";
 
-            `🚚 We'll deliver ASAP.`;
+    const buttons = [
+        {
+            id:
+                "ADD_PAYMENT",
 
+            title:
+                "💳 Pay Now"
+        }
+    ];
+
+    if (
+        body.length >
+        900
+    ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+            body
+        );
 
         await sendButtons(
-
             phoneNumberId,
-
             from,
-
-            body,
-
-            [
-                {
-                    id:
-                        "ADD_PAYMENT",
-
-                    title:
-                        "💳 Pay Now"
-                }
-            ]
+            `💰 *Total: ₹${bill.total.toFixed(2)}*\n` +
+            `📍 Delivery address confirmed.\n\n` +
+            `Tap below to continue.`,
+            buttons
         );
     }
 
     else {
 
-        body +=
-
-            "\n⚠️ No address found.\n" +
-
-            "Please add your delivery address first.";
-
-
         await sendButtons(
-
             phoneNumberId,
-
             from,
-
             body,
-
-            [
-                {
-                    id:
-                        "ADD_ADDRESS",
-
-                    title:
-                        "📍 Add Address"
-                }
-            ]
+            buttons
         );
     }
-
 
     session.status =
         STATES.FINAL;
 }
-
 
 /* =========================================================
    ORDER SAVE
@@ -4228,22 +4975,18 @@ async function getPendingStatusId(
 
             FROM order_status
 
-            WHERE status_code =
-                  'pending'
+            WHERE status_code = 'pending'
 
             LIMIT 1
             `
         );
 
-
     return (
-
         rows.length
             ? rows[0].status_id
             : null
     );
 }
-
 
 async function saveOrder(
     session,
@@ -4255,7 +4998,6 @@ async function saveOrder(
         session
     );
 
-
     if (
         !session.cart.length
     ) {
@@ -4265,13 +5007,11 @@ async function saveOrder(
         );
     }
 
-
     const bill =
         buildBill(
             session.cart,
             "Final Bill"
         );
-
 
     if (
         bill.total <=
@@ -4283,28 +5023,22 @@ async function saveOrder(
         );
     }
 
-
     const connection =
         await db
             .getConnection();
-
 
     try {
 
         await connection
             .beginTransaction();
 
-
         const statusId =
             await getPendingStatusId(
                 connection
             );
 
-
         const orderNumber =
-
             `ORD${Date.now()}${
-
                 Math.floor(
                     Math.random() *
                     10000
@@ -4315,7 +5049,6 @@ async function saveOrder(
                         "0"
                     )
             }`;
-
 
         const [orderResult] =
             await connection.execute(
@@ -4374,10 +5107,8 @@ async function saveOrder(
                 ]
             );
 
-
         const orderId =
             orderResult.insertId;
-
 
         for (
             const item
@@ -4419,25 +5150,21 @@ async function saveOrder(
                     ]
                 );
 
-
             if (
                 !rows.length
             ) {
 
                 throw new Error(
-
                     `${item.product_name} is no longer available.`
                 );
             }
 
-
             const dbProduct =
                 rows[0];
 
-
             if (
                 dbProduct.status !==
-                    "active" ||
+                "active" ||
 
                 !Number(
                     dbProduct.is_available
@@ -4446,38 +5173,32 @@ async function saveOrder(
                 normalizeText(
                     dbProduct.product_name
                 ) ===
-                    ""
+                ""
             ) {
 
                 throw new Error(
-
                     `${item.product_name} is no longer available.`
                 );
             }
-
 
             if (
                 Number(
                     dbProduct.selling_price
                 ) !==
-
                 Number(
                     item.unit_price
                 )
             ) {
 
                 throw new Error(
-
                     `Price changed for ${item.product_name}. Please restart the order.`
                 );
             }
-
 
             const stockQty =
                 quantityForStock(
                     item
                 );
-
 
             if (
                 Number(
@@ -4487,16 +5208,13 @@ async function saveOrder(
                 Number(
                     dbProduct.stock_quantity
                 ) <
-
                 stockQty
             ) {
 
                 throw new Error(
-
                     `Insufficient stock for ${item.product_name}.`
                 );
             }
-
 
             await connection.execute(
                 `
@@ -4575,7 +5293,6 @@ async function saveOrder(
                 ]
             );
 
-
             if (
                 Number(
                     dbProduct.stock_tracking
@@ -4604,44 +5321,85 @@ async function saveOrder(
             }
         }
 
+        let addressRows =
+            [];
 
-        const [addressRows] =
-            await connection.execute(
-                `
-                SELECT
-                    id,
-                    name,
-                    phone,
-                    address,
-                    landmark,
-                    city,
-                    state,
-                    pincode,
-                    country_id,
-                    state_id,
-                    latitude,
-                    longitude
+        if (
+            session.addressId
+        ) {
 
-                FROM customer_address
+            [addressRows] =
+                await connection.execute(
+                    `
+                    SELECT
+                        id,
+                        name,
+                        phone,
+                        address,
+                        landmark,
+                        city,
+                        state,
+                        pincode,
+                        country_id,
+                        state_id,
+                        latitude,
+                        longitude
 
-                WHERE customer_id = ?
+                    FROM customer_address
 
-                ORDER BY
-                    is_default DESC,
-                    id DESC
+                    WHERE customer_id = ?
 
-                LIMIT 1
-                `,
-                [
-                    customerId
-                ]
-            );
+                      AND id = ?
 
+                    LIMIT 1
+                    `,
+                    [
+                        customerId,
+                        session.addressId
+                    ]
+                );
+        }
+
+        if (
+            !addressRows.length
+        ) {
+
+            [addressRows] =
+                await connection.execute(
+                    `
+                    SELECT
+                        id,
+                        name,
+                        phone,
+                        address,
+                        landmark,
+                        city,
+                        state,
+                        pincode,
+                        country_id,
+                        state_id,
+                        latitude,
+                        longitude
+
+                    FROM customer_address
+
+                    WHERE customer_id = ?
+
+                    ORDER BY
+                        is_default DESC,
+                        id DESC
+
+                    LIMIT 1
+                    `,
+                    [
+                        customerId
+                    ]
+                );
+        }
 
         const a =
             addressRows[0] ||
             {};
-
 
         await connection.execute(
             `
@@ -4723,7 +5481,6 @@ async function saveOrder(
             ]
         );
 
-
         await connection.execute(
             `
             INSERT INTO cb_order_payments
@@ -4760,17 +5517,12 @@ async function saveOrder(
             ]
         );
 
-
         await connection
             .commit();
 
-
         return {
-
             orderId,
-
             orderNumber,
-
             total:
                 bill.total
         };
@@ -4783,7 +5535,6 @@ async function saveOrder(
         await connection
             .rollback();
 
-
         throw error;
     }
 
@@ -4794,7 +5545,6 @@ async function saveOrder(
     }
 }
 
-
 async function placePendingOrder(
     phoneNumberId,
     from,
@@ -4804,120 +5554,84 @@ async function placePendingOrder(
 
     if (
         session.paymentProcessing ||
-
         session.orderId
     ) {
-
         return;
     }
-
 
     cleanInvalidCartItems(
         session
     );
-
 
     if (
         !session.cart.length
     ) {
 
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "🛒 Your cart is empty."
         );
 
-
         return;
     }
 
-
     if (
-        !session.address
+        !session.address ||
+
+        !Number.isFinite(
+            Number(
+                session.addressLatitude
+            )
+        ) ||
+
+        !Number.isFinite(
+            Number(
+                session.addressLongitude
+            )
+        )
     ) {
 
-        const saved =
-            await getAddress(
-                customerId
-            );
-
-
-        if (saved) {
-
-            session.address =
-                saved.address;
-        }
-    }
-
-
-    if (
-        !session.address
-    ) {
-
-        session.status =
-            STATES.AWAITING_ADDRESS;
-
-
-        await sendText(
-
+        await askAddressChoice(
             phoneNumberId,
-
             from,
-
-            "📍 Please send your complete delivery address."
+            session,
+            customerId
         );
 
-
         return;
     }
-
 
     session.paymentProcessing =
         true;
 
-
     session.status =
         STATES.PROCESSING;
-
 
     try {
 
         const result =
             await saveOrder(
-
                 session,
-
                 from,
-
                 customerId
             );
-
 
         session.orderId =
             result.orderId;
 
-
         session.orderNumber =
             result.orderNumber;
-
 
         session.orderTotal =
             result.total;
 
-
         session.status =
             STATES.COMPLETED;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             `✅ *Order Placed! (Payment Pending)*\n\n` +
 
             `🧾 Order No: *${result.orderNumber}*\n` +
@@ -4939,21 +5653,14 @@ async function placePendingOrder(
         session.status =
             STATES.FINAL;
 
-
         console.error(
-
             "Order save failed:",
-
             error
         );
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             `❌ Could not place your order: ${error.message}`
         );
     }
@@ -4965,7 +5672,6 @@ async function placePendingOrder(
     }
 }
 
-
 /* =========================================================
    WEBHOOK SECURITY
 ========================================================= */
@@ -4975,10 +5681,8 @@ function verifySignature(
 ) {
 
     if (!APP_SECRET) {
-
         return true;
     }
-
 
     const received =
         String(
@@ -4988,10 +5692,8 @@ function verifySignature(
             ""
         );
 
-
     const expected =
         "sha256=" +
-
         crypto
             .createHmac(
                 "sha256",
@@ -5005,31 +5707,25 @@ function verifySignature(
                 "hex"
             );
 
-
     const a =
         Buffer.from(
             received
         );
-
 
     const b =
         Buffer.from(
             expected
         );
 
-
     return (
-
         a.length ===
-            b.length &&
-
+        b.length &&
         crypto.timingSafeEqual(
             a,
             b
         )
     );
 }
-
 
 /* =========================================================
    VERIFY WEBHOOK
@@ -5047,25 +5743,22 @@ app.get(
                 "hub.mode"
             ];
 
-
         const token =
             req.query[
                 "hub.verify_token"
             ];
-
 
         const challenge =
             req.query[
                 "hub.challenge"
             ];
 
-
         if (
             mode ===
-                "subscribe" &&
+            "subscribe" &&
 
             token ===
-                MYTOKEN
+            MYTOKEN
         ) {
 
             return res
@@ -5075,14 +5768,12 @@ app.get(
                 );
         }
 
-
         return res
             .sendStatus(
                 403
             );
     }
 );
-
 
 /* =========================================================
    MESSAGE HANDLER
@@ -5099,27 +5790,23 @@ async function handleMessage(
             ""
         );
 
-
     if (!from) {
-
         return;
     }
 
-
     const session =
         getSession(
-
             `${phoneNumberId}:${from}`
         );
-
 
     let text =
         "";
 
-
     let buttonId =
         null;
 
+    let location =
+        null;
 
     if (
         message.type ===
@@ -5128,15 +5815,46 @@ async function handleMessage(
 
         text =
             String(
-
                 message.text
                     ?.body ||
-
                 ""
-            )
-                .trim();
+            ).trim();
     }
 
+    else if (
+        message.type ===
+        "location"
+    ) {
+
+        location = {
+
+            latitude:
+                Number(
+                    message.location
+                        ?.latitude
+                ),
+
+            longitude:
+                Number(
+                    message.location
+                        ?.longitude
+                ),
+
+            name:
+                String(
+                    message.location
+                        ?.name ||
+                    ""
+                ).trim(),
+
+            address:
+                String(
+                    message.location
+                        ?.address ||
+                    ""
+                ).trim()
+        };
+    }
 
     else if (
         message.type ===
@@ -5144,120 +5862,92 @@ async function handleMessage(
     ) {
 
         if (
-            message
-                .interactive
+            message.interactive
                 ?.type ===
             "button_reply"
         ) {
 
             buttonId =
                 String(
-
                     message
                         .interactive
                         .button_reply
                         .id ||
-
                     ""
                 )
                     .trim()
                     .toUpperCase();
 
-
             text =
                 String(
-
                     message
                         .interactive
                         .button_reply
                         .title ||
-
                     ""
                 )
                     .trim();
         }
 
-
         else if (
-            message
-                .interactive
+            message.interactive
                 ?.type ===
             "list_reply"
         ) {
 
             buttonId =
                 String(
-
                     message
                         .interactive
                         .list_reply
                         .id ||
-
                     ""
                 )
                     .trim()
                     .toUpperCase();
 
-
             text =
                 String(
-
                     message
                         .interactive
                         .list_reply
                         .title ||
-
                     ""
                 )
                     .trim();
         }
     }
 
-
     const customerId =
         await ensureCustomer(
             from
         );
 
-
     const conversationId =
         await ensureConversation(
-
             currentMerchantId(),
-
             customerId,
-
             currentChannelId()
         );
-
 
     session.conversationId =
         conversationId;
 
-
     setConversationContext(
-
         phoneNumberId,
-
         from,
-
         conversationId
     );
 
-
     let shouldProcess =
         true;
-
 
     try {
 
         shouldProcess =
             await claimInboundMessage(
-
                 conversationId,
-
                 message,
-
                 text
             );
     }
@@ -5267,91 +5957,52 @@ async function handleMessage(
     ) {
 
         console.error(
-
             "Inbound DB save warning:",
-
             error.message
         );
-
-
-        /*
-         * DB logging failure should not
-         * completely stop the bot.
-         */
 
         shouldProcess =
             true;
     }
-
 
     if (
         !shouldProcess
     ) {
 
         console.log(
-
             `↩️ Duplicate WhatsApp message ignored: ${message.id}`
         );
-
 
         return;
     }
 
-
     /* =====================================================
-       WELCOME
-
-       ONLY:
-       Chacha
-       chacha
-
-       Nothing else.
+       WELCOME: ONLY Chacha OR chacha
     ===================================================== */
 
     if (
         !buttonId &&
-
         (
-            text ===
-                "Chacha" ||
-
-            text ===
-                "chacha"
+            text === "Chacha" ||
+            text === "chacha"
         )
     ) {
 
-        /*
-         * Start clean order.
-         *
-         * Old cart is removed.
-         * Address may remain.
-         */
-
         resetConversation(
             session,
-            true
+            false
         );
 
-
-        await sendText(
-
+        await sendWelcomeMessage(
             phoneNumberId,
-
-            from,
-
-            welcomeMessage()
+            from
         );
-
 
         return;
     }
 
-
     /* =====================================================
        COMPLETED ORDER
-
-       OLD BUTTONS / OLD MESSAGES
-       CANNOT REOPEN ORDER.
     ===================================================== */
 
     if (
@@ -5360,23 +6011,17 @@ async function handleMessage(
     ) {
 
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "✅ Your previous order is already completed.\n\n" +
-
             "Type *Chacha* to start a new order."
         );
-
 
         return;
     }
 
-
     /* =====================================================
-       ADD MORE ITEMS BUTTON
+       ADD MORE ITEMS
     ===================================================== */
 
     if (
@@ -5390,43 +6035,29 @@ async function handleMessage(
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
         session.status =
             STATES.AWAITING_MORE;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "➕ Please type the next item.\n\n" +
-
             "Example: *Milk 2 Ltr*"
         );
-
 
         return;
     }
 
-
     /* =====================================================
-       EDIT ITEM BUTTON
+       EDIT ITEM
     ===================================================== */
 
     if (
@@ -5440,37 +6071,25 @@ async function handleMessage(
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
         await sendEditMenu(
-
             phoneNumberId,
-
             from,
-
             session
         );
-
 
         return;
     }
 
-
     /* =====================================================
-       CONFIRM BUTTON
+       CONFIRM CART
     ===================================================== */
 
     if (
@@ -5482,96 +6101,243 @@ async function handleMessage(
             session
         );
 
-
         if (
             session.status !==
-                STATES.PREORDER ||
+            STATES.PREORDER ||
 
             !session.cart.length
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 "🛒 No valid products are available to confirm.\n\n" +
-
                 "Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
-        await sendFinalBill(
-
+        await askAddressChoice(
             phoneNumberId,
-
             from,
-
             session,
-
             customerId
         );
-
 
         return;
     }
 
-
     /* =====================================================
-       ADD ADDRESS BUTTON
+       PREVIOUS ADDRESS
     ===================================================== */
 
     if (
+        buttonId ===
+        "USE_PREVIOUS_ADDRESS"
+    ) {
+
+        if (
+            session.status !==
+            STATES.AWAITING_ADDRESS_CHOICE
+        ) {
+
+            await sendText(
+                phoneNumberId,
+                from,
+                "This button is no longer active. Type *Chacha* to start again."
+            );
+
+            return;
+        }
+
+        const savedAddress =
+            await getAddress(
+                customerId
+            );
+
+        if (
+            !savedAddress
+        ) {
+
+            session.status =
+                STATES.AWAITING_ADDRESS;
+
+            await sendText(
+                phoneNumberId,
+                from,
+                "📍 Previous address was not found.\n\n" +
+                "Please send your current complete address, or share your WhatsApp location pin."
+            );
+
+            return;
+        }
+
+        try {
+
+            const resolved =
+                await prepareSavedAddressForDistance(
+                    savedAddress
+                );
+
+            const distance =
+                await validateDeliveryDistance(
+                    resolved
+                );
+
+            if (
+                !distance.withinRange
+            ) {
+
+                session.status =
+                    STATES.AWAITING_ADDRESS_CHOICE;
+
+                let message =
+                    `🚫 *Previous address is outside the delivery area.*\n\n` +
+
+                    `📏 Distance: *${distance.distanceKm.toFixed(2)} km*`;
+
+                if (
+                    distance.maxDistanceKm != null
+                ) {
+
+                    message +=
+                        `\n🚚 Delivery limit: *${distance.maxDistanceKm.toFixed(2)} km*`;
+                }
+
+                message +=
+                    "\n\nPlease use your current address.";
+
+                await sendButtons(
+                    phoneNumberId,
+                    from,
+                    message,
+                    [
+                        {
+                            id:
+                                "USE_CURRENT_ADDRESS",
+
+                            title:
+                                "📍 Current Address"
+                        }
+                    ]
+                );
+
+                return;
+            }
+
+            setSessionAddress(
+                session,
+                resolved,
+                distance
+            );
+
+            await sendText(
+                phoneNumberId,
+                from,
+                `✅ Previous address selected.\n` +
+                `📏 Distance from store: *${distance.distanceKm.toFixed(2)} km*`
+            );
+
+            await sendFinalBill(
+                phoneNumberId,
+                from,
+                session
+            );
+        }
+
+        catch (
+            error
+        ) {
+
+            session.status =
+                STATES.AWAITING_ADDRESS_CHOICE;
+
+            await sendButtons(
+                phoneNumberId,
+                from,
+                `⚠️ Could not verify the previous address distance.\n\n` +
+                `${error.message}\n\n` +
+                `Please use your current address.`,
+                [
+                    {
+                        id:
+                            "USE_CURRENT_ADDRESS",
+
+                        title:
+                            "📍 Current Address"
+                    }
+                ]
+            );
+        }
+
+        return;
+    }
+
+    /* =====================================================
+       CURRENT ADDRESS
+    ===================================================== */
+
+    if (
+        buttonId ===
+        "USE_CURRENT_ADDRESS" ||
+
         buttonId ===
         "ADD_ADDRESS"
     ) {
 
         if (
-            session.status !==
-            STATES.FINAL
+            ![
+                STATES.AWAITING_ADDRESS_CHOICE,
+                STATES.FINAL
+            ]
+                .includes(
+                    session.status
+                )
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
+        session.address =
+            null;
+
+        session.addressId =
+            null;
+
+        session.addressLatitude =
+            null;
+
+        session.addressLongitude =
+            null;
+
+        session.deliveryDistanceKm =
+            null;
 
         session.status =
             STATES.AWAITING_ADDRESS;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
+            "📍 *Current Address*\n\n" +
 
-            "📍 Please send your complete delivery address."
+            "Please send your complete current delivery address.\n\n" +
+
+            "You can also share your WhatsApp location pin for a faster distance check."
         );
-
 
         return;
     }
 
-
     /* =====================================================
-       PAY NOW BUTTON
+       PAY NOW
     ===================================================== */
 
     if (
@@ -5583,45 +6349,31 @@ async function handleMessage(
             session
         );
 
-
         if (
             session.status !==
-                STATES.FINAL ||
+            STATES.FINAL ||
 
             !session.cart.length
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This payment button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This payment button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
         await placePendingOrder(
-
             phoneNumberId,
-
             from,
-
             session,
-
             customerId
         );
 
-
         return;
     }
-
 
     /* =====================================================
        BACK TO CART
@@ -5643,38 +6395,25 @@ async function handleMessage(
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
         session.editItemNo =
             null;
 
-
         await sendPreOrderBill(
-
             phoneNumberId,
-
             from,
-
             session
         );
 
-
         return;
     }
-
 
     /* =====================================================
        EDIT QUANTITY BUTTON
@@ -5698,73 +6437,52 @@ async function handleMessage(
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
         const itemNo =
             Number(
-
                 buttonId.replace(
                     "EDIT_QTY_",
                     ""
                 )
             );
 
-
         const item =
             session.cart
                 .find(
                     x =>
-
                         Number(
                             x.cartId
                         ) ===
                         itemNo
                 );
 
-
         if (!item) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 "❌ Product is no longer in the cart."
             );
-
 
             return;
         }
 
-
         session.editItemNo =
             itemNo;
-
 
         session.status =
             STATES.AWAITING_EDIT_DETAILS;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             `✏️ *${item.product_name}*\n` +
 
             `Current: ${formatQty(item.qty)} ${item.unit}\n\n` +
@@ -5774,13 +6492,11 @@ async function handleMessage(
             `Examples: *2 kg*, *500 g*, *3 pcs*`
         );
 
-
         return;
     }
 
-
     /* =====================================================
-       REMOVE ITEM BUTTON
+       REMOVE ITEM
     ===================================================== */
 
     if (
@@ -5801,61 +6517,43 @@ async function handleMessage(
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "This button is no longer active. " +
-
-                "Type *Chacha* to start again."
+                "This button is no longer active. Type *Chacha* to start again."
             );
-
 
             return;
         }
 
-
         const itemNo =
             Number(
-
                 buttonId.replace(
                     "REMOVE_ITEM_",
                     ""
                 )
             );
 
-
         const result =
             removeCartItem(
-
                 session,
-
                 itemNo
             );
-
 
         if (
             result.error
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 `❌ ${result.error}`
             );
-
 
             return;
         }
 
-
         session.editItemNo =
             null;
-
 
         if (
             !session.cart.length
@@ -5864,54 +6562,46 @@ async function handleMessage(
             session.status =
                 STATES.IDLE;
 
-
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 `🗑️ ${result.removed.product_name} removed.\n\n` +
-
                 `🛒 Your cart is now empty.`
             );
-
 
             return;
         }
 
-
         await sendPreOrderBill(
-
             phoneNumberId,
-
             from,
-
             session,
-
             `🗑️ Removed: ${result.removed.product_name}`
         );
 
-
         return;
     }
-
 
     /* =====================================================
        EMPTY / UNSUPPORTED MESSAGE
     ===================================================== */
 
-    if (!text) {
+    if (
+        !text &&
+        !(
+            session.status ===
+            STATES.AWAITING_ADDRESS &&
+            location
+        )
+    ) {
 
         return;
     }
-
 
     const normalized =
         normalizeText(
             text
         );
-
 
     /* =====================================================
        CANCEL
@@ -5933,22 +6623,15 @@ async function handleMessage(
             true
         );
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "🗑️ Your current order has been cancelled.\n\n" +
-
             "Type *Chacha* to start again."
         );
 
-
         return;
     }
-
 
     /* =====================================================
        VIEW CART
@@ -5969,42 +6652,30 @@ async function handleMessage(
             session
         );
 
-
         if (
             !session.cart.length
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 "🛒 Your cart is empty."
             );
-
 
             return;
         }
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             buildBill(
                 session.cart,
                 "Your Cart"
-            )
-                .text
+            ).text
         );
-
 
         return;
     }
-
 
     /* =====================================================
        ADDRESS INPUT
@@ -6015,75 +6686,174 @@ async function handleMessage(
         STATES.AWAITING_ADDRESS
     ) {
 
-        const address =
-            String(
-                text
-            )
-                .trim();
+        try {
 
+            let addressData =
+                null;
 
-        if (
-            address.length <
-            5
-        ) {
+            if (
+                location
+            ) {
 
-            await sendText(
+                if (
+                    !Number.isFinite(
+                        location.latitude
+                    ) ||
 
-                phoneNumberId,
+                    !Number.isFinite(
+                        location.longitude
+                    )
+                ) {
 
-                from,
+                    throw new Error(
+                        "Invalid WhatsApp location coordinates."
+                    );
+                }
 
-                "📍 Please send a valid complete delivery address."
+                const reverseGeo =
+                    await reverseGeocodeCoordinates(
+                        location.latitude,
+                        location.longitude
+                    );
+
+                addressData = {
+
+                    ...reverseGeo,
+
+                    address:
+                        location.address ||
+                        location.name ||
+                        reverseGeo.address,
+
+                    name:
+                        location.name ||
+                        null
+                };
+            }
+
+            else {
+
+                const address =
+                    String(
+                        text ||
+                        ""
+                    ).trim();
+
+                if (
+                    address.length <
+                    5
+                ) {
+
+                    await sendText(
+                        phoneNumberId,
+                        from,
+                        "📍 Please send a valid complete delivery address, or share your WhatsApp location pin."
+                    );
+
+                    return;
+                }
+
+                addressData =
+                    await geocodeAddress(
+                        address
+                    );
+            }
+
+            const distance =
+                await validateDeliveryDistance(
+                    addressData
+                );
+
+            if (
+                !distance.withinRange
+            ) {
+
+                let message =
+                    `🚫 *This address is outside the delivery area.*\n\n` +
+
+                    `📏 Distance from store: *${distance.distanceKm.toFixed(2)} km*`;
+
+                if (
+                    distance.maxDistanceKm != null
+                ) {
+
+                    message +=
+                        `\n🚚 Delivery limit: *${distance.maxDistanceKm.toFixed(2)} km*`;
+                }
+
+                message +=
+                    "\n\nPlease send another current address within the delivery area.";
+
+                await sendText(
+                    phoneNumberId,
+                    from,
+                    message
+                );
+
+                return;
+            }
+
+            const addressId =
+                await saveAddress(
+                    customerId,
+                    from,
+                    addressData
+                );
+
+            const saved = {
+
+                ...addressData,
+
+                id:
+                    addressId
+            };
+
+            setSessionAddress(
+                session,
+                saved,
+                distance
             );
 
+            session.status =
+                STATES.FINAL;
 
-            return;
+            await sendText(
+                phoneNumberId,
+                from,
+                `✅ Current address saved successfully.\n` +
+                `📍 ${saved.address}\n` +
+                `📏 Distance from store: *${distance.distanceKm.toFixed(2)} km*`
+            );
+
+            await sendFinalBill(
+                phoneNumberId,
+                from,
+                session
+            );
         }
 
+        catch (
+            error
+        ) {
 
-        await saveAddress(
+            console.error(
+                "Address verification error:",
+                error.message
+            );
 
-            customerId,
+            await sendText(
+                phoneNumberId,
+                from,
+                `❌ Could not verify this address.\n\n` +
 
-            from,
+                `${error.message}\n\n` +
 
-            address
-        );
-
-
-        session.address =
-            address;
-
-
-        session.status =
-            STATES.FINAL;
-
-
-        await sendText(
-
-            phoneNumberId,
-
-            from,
-
-            "✅ Address saved successfully."
-        );
-
-
-        await sendFinalBill(
-
-            phoneNumberId,
-
-            from,
-
-            session,
-
-            customerId
-        );
-
+                `Please send a complete address or share your WhatsApp location pin.`
+            );
+        }
 
         return;
     }
-
 
     /* =====================================================
        EDIT ITEM NUMBER
@@ -6099,58 +6869,41 @@ async function handleMessage(
                 normalized
             );
 
-
         const item =
             session.cart
                 .find(
                     x =>
-
                         Number(
                             x.cartId
                         ) ===
                         itemNo
                 );
 
-
         if (!item) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "❌ Please enter a valid item number. " +
-
-                "Example: *1*"
+                "❌ Please enter a valid item number. Example: *1*"
             );
-
 
             return;
         }
 
-
         session.editItemNo =
             itemNo;
-
 
         session.status =
             STATES.AWAITING_EDIT_DETAILS;
 
-
         await sendEditAction(
-
             phoneNumberId,
-
             from,
-
             item
         );
 
-
         return;
     }
-
 
     /* =====================================================
        EDIT QUANTITY TEXT
@@ -6163,90 +6916,62 @@ async function handleMessage(
 
         const match =
             normalized.match(
-
                 /^(\d+(?:\.\d+)?)(?:\s+([a-zA-Z.]+))?$/
             );
 
-
         if (
             !match ||
-
             !session.editItemNo
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
-                "❌ Send the new quantity like " +
-
-                "*2 kg*, *500 g* or *3 pcs*."
+                "❌ Send the new quantity like *2 kg*, *500 g* or *3 pcs*."
             );
-
 
             return;
         }
 
-
         const result =
             editCartItem(
-
                 session,
-
                 session.editItemNo,
-
                 Number(
                     match[1]
                 ),
-
                 match[2] ||
                 null
             );
-
 
         if (
             result.error
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 `❌ ${result.error}`
             );
-
 
             return;
         }
 
-
         const itemNo =
             session.editItemNo;
-
 
         session.editItemNo =
             null;
 
-
         await sendPreOrderBill(
-
             phoneNumberId,
-
             from,
-
             session,
-
             `✅ Item ${itemNo} updated successfully.`
         );
 
-
         return;
     }
-
 
     /* =====================================================
        FINAL STATE
@@ -6258,18 +6983,13 @@ async function handleMessage(
     ) {
 
         await sendText(
-
             phoneNumberId,
-
             from,
-
-            "Please tap *Pay Now* or *Add Address* above."
+            "Please tap *Pay Now* above to continue."
         );
-
 
         return;
     }
-
 
     if (
         session.status ===
@@ -6277,22 +6997,40 @@ async function handleMessage(
     ) {
 
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "Your order is being processed."
         );
-
 
         return;
     }
 
+    /* =====================================================
+       BLOCK LINKS FROM PRODUCT MATCHING
+    ===================================================== */
+
+    if (
+        /^(?:https?:\/\/|www\.)/i
+            .test(
+                String(
+                    text
+                ).trim()
+            )
+    ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+            "❌ A link cannot be added as a product.\n\n" +
+            "Please type the product name and quantity.\n" +
+            "Example: *Atta 2 Kg*"
+        );
+
+        return;
+    }
 
     /* =====================================================
        ADD PRODUCT
-       IDLE / MORE / PREORDER
     ===================================================== */
 
     const parsed =
@@ -6300,40 +7038,25 @@ async function handleMessage(
             text
         );
 
-
     const validItems =
         parsed
             .filter(
                 item =>
-
                     !item.error &&
-
                     isValidCartItem(
                         item
                     )
             );
 
-
     const invalidItems =
         parsed
             .filter(
                 item =>
-
                     item.error ||
-
                     !isValidCartItem(
                         item
                     )
             );
-
-
-    /*
-     * CRITICAL:
-     *
-     * No valid product =
-     * NO CART
-     * NO BILL
-     */
 
     if (
         !validItems.length
@@ -6342,74 +7065,46 @@ async function handleMessage(
         let message =
             "❌ Product not found.";
 
-
         if (
             invalidItems.length
         ) {
 
             const reasons =
                 invalidItems
-
                     .map(
                         item =>
                             item.error
                     )
-
                     .filter(
                         Boolean
                     );
-
 
             if (
                 reasons.length
             ) {
 
                 message +=
-
-                    `\n\n${
-
-                        reasons.join(
-                            "\n"
-                        )
-                    }`;
+                    `\n\n${reasons.join("\n")}`;
             }
         }
 
-
         message +=
-
-            "\n\nExample:\n" +
-
-            "*Atta 2 Kg*";
-
+            "\n\nExample:\n*Atta 2 Kg*";
 
         await sendText(
-
             phoneNumberId,
-
             from,
-
             message
         );
-
 
         return;
     }
 
-
     const operation =
         addToCart(
-
             session,
-
             validItems
         );
-
-
-    cleanInvalidCartItems(
-        session
-    );
-
 
     if (
         !session.cart.length
@@ -6418,20 +7113,14 @@ async function handleMessage(
         session.status =
             STATES.IDLE;
 
-
         await sendText(
-
             phoneNumberId,
-
             from,
-
             "❌ No valid product was added."
         );
 
-
         return;
     }
-
 
     if (
         invalidItems.length
@@ -6439,29 +7128,22 @@ async function handleMessage(
 
         const reasons =
             invalidItems
-
                 .map(
                     x =>
                         x.error
                 )
-
                 .filter(
                     Boolean
                 );
-
 
         if (
             reasons.length
         ) {
 
             await sendText(
-
                 phoneNumberId,
-
                 from,
-
                 `⚠️ Some items were not added:\n\n${
-
                     reasons
                         .map(
                             x =>
@@ -6470,27 +7152,26 @@ async function handleMessage(
                         .join(
                             "\n"
                         )
-
                 }`
             );
         }
     }
 
+    await sendProductImages(
+        phoneNumberId,
+        from,
+        operation.added
+    );
 
     await sendPreOrderBill(
-
         phoneNumberId,
-
         from,
-
         session,
-
         cartOperationNote(
             operation
         )
     );
 }
-
 
 /* =========================================================
    WEBHOOK POST
@@ -6498,7 +7179,6 @@ async function handleMessage(
 
 app.post(
     "/webhook",
-
     async (
         req,
         res
@@ -6516,21 +7196,17 @@ app.post(
                     "Invalid Meta webhook signature"
                 );
 
-
                 return res
                     .sendStatus(
                         403
                     );
             }
 
-
             const body =
                 req.body;
 
-
             if (
                 !body ||
-
                 body.object !==
                 "whatsapp_business_account"
             ) {
@@ -6540,7 +7216,6 @@ app.post(
                         200
                     );
             }
-
 
             for (
                 const entry
@@ -6557,11 +7232,6 @@ app.post(
                     const value =
                         change.value ||
                         {};
-
-
-                    /*
-                     * DELIVERY / READ / FAILED STATUS
-                     */
 
                     for (
                         const status
@@ -6581,19 +7251,15 @@ app.post(
                         ) {
 
                             console.error(
-
                                 "Status update warning:",
-
                                 error.message
                             );
                         }
                     }
 
-
                     const messages =
                         value.messages ||
                         [];
-
 
                     if (
                         !messages.length
@@ -6602,11 +7268,9 @@ app.post(
                         continue;
                     }
 
-
                     const phoneNumberId =
                         value.metadata
                             ?.phone_number_id;
-
 
                     if (
                         !phoneNumberId
@@ -6616,60 +7280,90 @@ app.post(
                             "metadata.phone_number_id missing"
                         );
 
-
                         continue;
                     }
-
-
-                    /*
-                     * AUTOMATIC MERCHANT MAPPING
-                     */
 
                     const channel =
                         await getMerchantByNumber(
                             phoneNumberId
                         );
 
-
-                    if (!channel) {
+                    if (
+                        !channel
+                    ) {
 
                         console.warn(
-
                             `No active approved/test merchant for: ${phoneNumberId}`
                         );
-
 
                         continue;
                     }
 
+                    const unseenMessages =
+                        [];
 
-                    /*
-                     * LOAD ONLY THIS MERCHANT'S PRODUCTS
-                     */
+                    for (
+                        const message
+                        of messages
+                    ) {
+
+                        try {
+
+                            if (
+                                message?.id &&
+                                await isMessageAlreadySaved(
+                                    message.id
+                                )
+                            ) {
+
+                                console.log(
+                                    `↩️ Duplicate WhatsApp message ignored before catalog load: ${message.id}`
+                                );
+
+                                continue;
+                            }
+                        }
+
+                        catch (
+                            error
+                        ) {
+
+                            console.error(
+                                "Early duplicate check warning:",
+                                error.message
+                            );
+                        }
+
+                        unseenMessages.push(
+                            message
+                        );
+                    }
+
+                    if (
+                        !unseenMessages.length
+                    ) {
+
+                        continue;
+                    }
 
                     const context =
                         await loadMerchantCatalog(
                             channel
                         );
 
-
                     await merchantContext.run(
-
                         context,
-
                         async () => {
 
                             for (
                                 const message
-                                of messages
+                                of unseenMessages
                             ) {
 
                                 try {
 
                                     await handleMessage(
-
                                         phoneNumberId,
-
                                         message
                                     );
                                 }
@@ -6679,13 +7373,10 @@ app.post(
                                 ) {
 
                                     console.error(
-
                                         "Message processing error:",
-
-                                        error.response?.data ||
-
+                                        error.response
+                                            ?.data ||
                                         error.message ||
-
                                         error
                                     );
                                 }
@@ -6694,7 +7385,6 @@ app.post(
                     );
                 }
             }
-
 
             return res
                 .sendStatus(
@@ -6707,22 +7397,12 @@ app.post(
         ) {
 
             console.error(
-
                 "Webhook error:",
-
-                error.response?.data ||
-
+                error.response
+                    ?.data ||
                 error.message ||
-
                 error
             );
-
-
-            /*
-             * Return 200 so Meta does not
-             * repeatedly send the same
-             * webhook forever.
-             */
 
             return res
                 .sendStatus(
@@ -6732,14 +7412,12 @@ app.post(
     }
 );
 
-
 /* =========================================================
    HEALTH CHECK
 ========================================================= */
 
 app.get(
     "/",
-
     async (
         req,
         res
@@ -6751,21 +7429,20 @@ app.get(
                 "SELECT 1"
             );
 
-
             res
                 .status(200)
                 .json({
-
                     success:
                         true,
 
                     message:
                         "CODE-Bot WhatsApp server is running",
 
-                    welcome_command: [
-                        "Chacha",
-                        "chacha"
-                    ]
+                    welcome_command:
+                        [
+                            "Chacha",
+                            "chacha"
+                        ]
                 });
         }
 
@@ -6776,7 +7453,6 @@ app.get(
             res
                 .status(500)
                 .json({
-
                     success:
                         false,
 
@@ -6786,7 +7462,6 @@ app.get(
         }
     }
 );
-
 
 /* =========================================================
    START
@@ -6800,11 +7475,9 @@ async function start() {
             "SELECT 1"
         );
 
-
         console.log(
             "✅ Database connected"
         );
-
 
         if (!TOKEN) {
 
@@ -6813,7 +7486,6 @@ async function start() {
             );
         }
 
-
         if (!MYTOKEN) {
 
             console.warn(
@@ -6821,37 +7493,44 @@ async function start() {
             );
         }
 
-
         if (!APP_SECRET) {
 
             console.warn(
-
                 "⚠️ APP_SECRET not set; webhook signature verification is disabled"
             );
         }
 
+        if (
+            !GOOGLE_MAPS_API_KEY
+        ) {
+
+            console.warn(
+                "⚠️ GOOGLE_MAPS_API_KEY missing. Typed-address distance checking will not work; WhatsApp location pins will still work."
+            );
+        }
 
         app.listen(
-
             PORT,
-
             () => {
 
                 console.log(
-
                     `🚀 CODE-Bot webhook running on port ${PORT}`
                 );
 
-
                 console.log(
-
                     "🤖 Welcome command: Chacha / chacha ONLY"
                 );
 
+                console.log(
+                    "🏪 Automatic merchant mapping enabled"
+                );
 
                 console.log(
+                    "📍 Previous / Current address selection enabled"
+                );
 
-                    "🏪 Automatic merchant mapping enabled"
+                console.log(
+                    "📏 Merchant delivery-distance checking enabled"
                 );
             }
         );
@@ -6862,18 +7541,14 @@ async function start() {
     ) {
 
         console.error(
-
             "❌ Server startup failed:",
-
             error.message
         );
-
 
         process.exit(
             1
         );
     }
 }
-
 
 start();
