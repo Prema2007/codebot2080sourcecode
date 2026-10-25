@@ -74,40 +74,44 @@ const conversationContexts =
    DATABASE
 ========================================================= */
 
-const db = mysql.createPool({
-    host:
-        process.env.DB_HOST ||
-        "localhost",
+const db =
+    mysql.createPool({
 
-    user:
-        process.env.DB_USER ||
-        "root",
+        host:
+            process.env.DB_HOST ||
+            "localhost",
 
-    password:
-        process.env.DB_PASSWORD ||
-        "",
+        user:
+            process.env.DB_USER ||
+            "root",
 
-    database:
-        process.env.DB_NAME ||
-        "code_bot_version1.1",
+        password:
+            process.env.DB_PASSWORD ||
+            "",
 
-    waitForConnections:
-        true,
+        database:
+            process.env.DB_NAME ||
+            "code_bot_version1.1",
 
-    connectionLimit:
-        10,
+        waitForConnections:
+            true,
 
-    queueLimit:
-        0,
+        connectionLimit:
+            10,
 
-    decimalNumbers:
-        true
-});
+        queueLimit:
+            0,
+
+        decimalNumbers:
+            true
+    });
+
 
 async function query(
     sql,
     params = []
 ) {
+
     const [rows] =
         await db.execute(
             sql,
@@ -116,6 +120,7 @@ async function query(
 
     return rows;
 }
+
 
 /* =========================================================
    CURRENT MERCHANT CONTEXT
