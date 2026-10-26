@@ -622,70 +622,141 @@ function formatQty(
    PRODUCT SEARCH
 ========================================================= */
 
-function buildSearchTokens(
-    row
-) {
+/*
+ * STRICT PRODUCT MATCHING RULES
+ *
+ * 1. Minimum confidence = 80%
+ * 2. Product name is trusted.
+ * 3. Brand + product name can be used as one phrase.
+ * 4. Genuine aliases can be used.
+ * 5. Brand alone can NEVER create a product match.
+ * 6. Category, description and package size are NOT used.
+ * 7. Exact aliases must identify only one product.
+ * 8. Ambiguous matches are rejected instead of choosing
+ *    the first product from the database.
+ */
 
-    const phrases =
-        new Set();
+const PRODUCT_MATCH_THRESHOLD = 0.80;
+const PRODUCT_MATCH_AMBIGUITY_MARGIN = 0.08;
 
-    function addPhrase(
-        value
-    ) {
 
-        const normalized =
-            normalizeText(
-                value
-            );
+/* =========================================================
+   SAFE SEARCH PHRASES
+========================================================= */
 
-        if (!normalized) {
-            return;
-        }
+function splitAliases(value) {
 
-        phrases.add(
-            normalized
-        );
-    }
-
-    addPhrase(
-        row.product_name
-    );
-
-    if (
-        normalizeText(
-            row.brand_name
-        ) &&
-        normalizeText(
-            row.product_name
-        )
-    ) {
-
-        addPhrase(
-            `${row.brand_name} ${row.product_name}`
-        );
-    }
-
-    String(
-        row.aliases || ""
+    return String(
+        value || ""
     )
         .split(
             /[,|;]+/
         )
         .map(
-            value =>
-                value.trim()
+            item =>
+                normalizeText(
+                    item
+                )
         )
         .filter(
             Boolean
-        )
-        .forEach(
-            addPhrase
         );
+}
+
+
+function buildSearchTokens(row) {
+
+    const phrases =
+        new Set();
+
+    const productName =
+        normalizeText(
+            row.product_name
+        );
+
+    const brandName =
+        normalizeText(
+            row.brand_name
+        );
+
+
+    /*
+     * Product name is always searchable.
+     */
+
+    if (
+        productName
+    ) {
+
+        phrases.add(
+            productName
+        );
+    }
+
+
+    /*
+     * Brand is NEVER added alone.
+     *
+     * Example:
+     *
+     * Product = Cockroach Killer
+     * Brand   = Exit No Entry
+     *
+     * "Exit" must NOT match.
+     *
+     * But:
+     *
+     * "Exit No Entry Cockroach Killer"
+     *
+     * may match because it is specific.
+     */
+
+    if (
+        brandName &&
+        productName
+    ) {
+
+        phrases.add(
+            `${brandName} ${productName}`
+        );
+    }
+
+
+    /*
+     * Genuine aliases only.
+     */
+
+    for (
+        const alias
+        of splitAliases(
+            row.aliases
+        )
+    ) {
+
+        phrases.add(
+            alias
+        );
+    }
+
+
+    /*
+     * DO NOT ADD:
+     *
+     * row.brand_name by itself
+     * row.category_name
+     * row.description
+     * row.package_size
+     */
 
     return [
         ...phrases
     ];
 }
+
+
+/* =========================================================
+   PRODUCT VALIDATION
+========================================================= */
 
 function isUsableProduct(
     product
@@ -716,91 +787,222 @@ function isUsableProduct(
     );
 }
 
-function findProduct(
-    queryText
+
+/* =========================================================
+   LEVENSHTEIN DISTANCE
+   Used only for small spelling mistakes.
+========================================================= */
+
+function levenshteinDistance(
+    a,
+    b
+) {
+
+    const source =
+        String(
+            a || ""
+        );
+
+    const target =
+        String(
+            b || ""
+        );
+
+    const rows =
+        source.length + 1;
+
+    const cols =
+        target.length + 1;
+
+    const matrix =
+        Array.from(
+            {
+                length:
+                    rows
+            },
+            () =>
+                new Array(
+                    cols
+                ).fill(0)
+        );
+
+
+    for (
+        let i = 0;
+        i < rows;
+        i++
+    ) {
+
+        matrix[i][0] =
+            i;
+    }
+
+
+    for (
+        let j = 0;
+        j < cols;
+        j++
+    ) {
+
+        matrix[0][j] =
+            j;
+    }
+
+
+    for (
+        let i = 1;
+        i < rows;
+        i++
+    ) {
+
+        for (
+            let j = 1;
+            j < cols;
+            j++
+        ) {
+
+            const cost =
+                source[i - 1] ===
+                target[j - 1]
+                    ? 0
+                    : 1;
+
+            matrix[i][j] =
+                Math.min(
+
+                    matrix[i - 1][j] +
+                    1,
+
+                    matrix[i][j - 1] +
+                    1,
+
+                    matrix[i - 1][j - 1] +
+                    cost
+                );
+        }
+    }
+
+
+    return matrix[
+        source.length
+    ][
+        target.length
+    ];
+}
+
+
+/* =========================================================
+   CHARACTER SIMILARITY
+========================================================= */
+
+function characterSimilarity(
+    a,
+    b
+) {
+
+    const left =
+        normalizeText(
+            a
+        );
+
+    const right =
+        normalizeText(
+            b
+        );
+
+
+    if (
+        !left ||
+        !right
+    ) {
+
+        return 0;
+    }
+
+
+    if (
+        left ===
+        right
+    ) {
+
+        return 1;
+    }
+
+
+    const maxLength =
+        Math.max(
+            left.length,
+            right.length
+        );
+
+
+    if (
+        maxLength === 0
+    ) {
+
+        return 1;
+    }
+
+
+    const distance =
+        levenshteinDistance(
+            left,
+            right
+        );
+
+
+    return Math.max(
+        0,
+
+        1 -
+        (
+            distance /
+            maxLength
+        )
+    );
+}
+
+
+/* =========================================================
+   WORD / PHRASE CONFIDENCE
+========================================================= */
+
+function productPhraseConfidence(
+    query,
+    candidate
 ) {
 
     const q =
         normalizeText(
-            queryText
+            query
         );
 
-    if (!q) {
-        return null;
-    }
+    const c =
+        normalizeText(
+            candidate
+        );
 
-    const nonProductPhrases =
-        new Set([
-            "hi",
-            "hii",
-            "hiii",
-            "hello",
-            "hey",
-            "ok",
-            "okay",
-            "thanks",
-            "thank you",
-            "thankyou",
-            "yes",
-            "no",
-            "good morning",
-            "good afternoon",
-            "good evening",
-            "good night"
-        ]);
 
     if (
-        nonProductPhrases.has(
-            q
-        )
+        !q ||
+        !c
     ) {
-        return null;
+
+        return 0;
     }
+
+
+    /*
+     * Exact phrase = 100%
+     */
 
     if (
-        /https?:\/\/|www\./i.test(
-            String(
-                queryText || ""
-            )
-        )
+        q === c
     ) {
-        return null;
+
+        return 1;
     }
 
-    const products =
-        currentProducts()
-            .filter(
-                isUsableProduct
-            );
-
-    let found =
-        products.find(
-            product =>
-                normalizeText(
-                    product.product_name
-                ) === q
-        );
-
-    if (found) {
-        return found;
-    }
-
-    found =
-        products.find(
-            product =>
-                (
-                    product.searchTokens ||
-                    []
-                )
-                    .some(
-                        phrase =>
-                            phrase === q
-                    )
-        );
-
-    if (found) {
-        return found;
-    }
 
     const queryWords =
         q
@@ -812,188 +1014,500 @@ function findProduct(
                     word.length >= 2
             );
 
+
+    const candidateWords =
+        c
+            .split(
+                /\s+/
+            )
+            .filter(
+                word =>
+                    word.length >= 2
+            );
+
+
     if (
-        !queryWords.length
+        !queryWords.length ||
+        !candidateWords.length
     ) {
+
+        return 0;
+    }
+
+
+    const candidateSet =
+        new Set(
+            candidateWords
+        );
+
+
+    let matchedWords =
+        0;
+
+
+    for (
+        const word
+        of queryWords
+    ) {
+
+        if (
+            candidateSet.has(
+                word
+            )
+        ) {
+
+            matchedWords++;
+        }
+    }
+
+
+    /*
+     * Query coverage:
+     * How much of what the CUSTOMER typed matched.
+     */
+
+    const queryCoverage =
+        matchedWords /
+        queryWords.length;
+
+
+    /*
+     * Candidate coverage:
+     * How much of the PRODUCT phrase matched.
+     *
+     * This prevents:
+     *
+     * "Exit"
+     *
+     * from strongly matching:
+     *
+     * "Exit No Entry Cockroach Killer"
+     */
+
+    const candidateCoverage =
+        matchedWords /
+        candidateWords.length;
+
+
+    /*
+     * Customer words are more important,
+     * but the candidate also needs to be reasonably close.
+     */
+
+    const wordScore =
+        (
+            queryCoverage *
+            0.65
+        ) +
+        (
+            candidateCoverage *
+            0.35
+        );
+
+
+    /*
+     * Character similarity allows small spelling mistakes.
+     *
+     * Examples:
+     *
+     * milk  -> milkk
+     * atta  -> attaa
+     */
+
+    const charScore =
+        characterSimilarity(
+            q,
+            c
+        );
+
+
+    /*
+     * IMPORTANT:
+     *
+     * A one-word customer query must NOT automatically
+     * select a longer multi-word product merely because
+     * that word appears inside the product name.
+     *
+     * Examples:
+     *
+     * "atta" must NOT automatically become "Atta Bread".
+     * "milk" must NOT automatically become "Milk Powder".
+     *
+     * A single-word query is accepted when:
+     * - it exactly matches a unique product name, OR
+     * - it exactly matches a unique alias, OR
+     * - it is a strong spelling correction of a
+     *   single-word product name.
+     */
+
+    if (
+        queryWords.length === 1 &&
+        candidateWords.length > 1
+    ) {
+
+        return (
+            charScore >=
+            PRODUCT_MATCH_THRESHOLD
+                ? charScore
+                : 0
+        );
+    }
+
+
+    /*
+     * If no complete word matched,
+     * only a strong spelling similarity is accepted.
+     */
+
+    if (
+        matchedWords === 0
+    ) {
+
+        return (
+            charScore >=
+            PRODUCT_MATCH_THRESHOLD
+                ? charScore
+                : 0
+        );
+    }
+
+
+    return Math.max(
+        wordScore,
+        charScore
+    );
+}
+
+
+/* =========================================================
+   SAFE PRODUCT RESULT
+========================================================= */
+
+function matchedProduct(
+    product,
+    confidence,
+    source
+) {
+
+    return {
+
+        ...product,
+
+        match_confidence:
+            Number(
+                confidence
+            ),
+
+        match_source:
+            source
+    };
+}
+
+
+/* =========================================================
+   BLOCK NORMAL CHAT / CONTROL WORDS
+========================================================= */
+
+function isBlockedProductQuery(
+    query
+) {
+
+    const blocked =
+        new Set([
+            "hi",
+            "hii",
+            "hiii",
+            "hello",
+            "hey",
+
+            "ok",
+            "okay",
+
+            "yes",
+            "no",
+
+            "thanks",
+            "thankyou",
+            "thank you",
+
+            "bye",
+            "goodbye",
+
+            "done",
+            "great",
+            "nice",
+            "good",
+
+            "confirm",
+
+            "cancel",
+            "reset",
+            "clear cart",
+
+            "cart",
+            "view cart",
+            "my cart",
+
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "good night"
+        ]);
+
+
+    return blocked.has(
+        query
+    );
+}
+
+
+/* =========================================================
+   FIND PRODUCT
+========================================================= */
+
+function findProduct(
+    queryText
+) {
+
+    const query =
+        normalizeText(
+            queryText
+        );
+
+    if (!query) {
         return null;
     }
 
+    /* Links can never be products. */
     if (
-        queryWords.length === 1
+        /(?:https?:\/\/|www\.)/i.test(
+            String(queryText || "")
+        )
     ) {
+        console.log(
+            `❌ Product query rejected because it is a URL: "${query}"`
+        );
+        return null;
+    }
 
-        const wanted =
-            queryWords[0];
+    /* Normal chat/control words can never create a bill. */
+    if (
+        isBlockedProductQuery(query)
+    ) {
+        console.log(
+            `❌ Blocked non-product text: "${query}"`
+        );
+        return null;
+    }
 
-        if (
-            wanted.length < 2
-        ) {
-            return null;
-        }
+    const products =
+        currentProducts()
+            .filter(isUsableProduct);
 
-        const candidates =
-            [];
+    if (!products.length) {
+        return null;
+    }
 
-        for (
-            const product
-            of products
-        ) {
+    /* =====================================================
+       1. EXACT PRODUCT NAME
+       Accept only when exactly one merchant product has it.
+    ===================================================== */
 
-            const phrases = [
-                normalizeText(
-                    product.product_name
-                ),
-                ...(
-                    product.searchTokens ||
-                    []
-                )
-            ]
-                .filter(
-                    Boolean
-                );
-
-            const hasWholeWord =
-                phrases.some(
-                    phrase =>
-                        phrase
-                            .split(
-                                /\s+/
-                            )
-                            .includes(
-                                wanted
-                            )
-                );
-
-            if (
-                hasWholeWord
-            ) {
-                candidates.push(
-                    product
-                );
-            }
-        }
-
-        if (
-            !candidates.length
-        ) {
-            return null;
-        }
-
-        candidates.sort(
-            (
-                a,
-                b
-            ) =>
-                normalizeText(
-                    a.product_name
-                ).length -
-                normalizeText(
-                    b.product_name
-                ).length
+    const exactNameMatches =
+        products.filter(
+            product =>
+                normalizeText(product.product_name) === query
         );
 
-        return candidates[0];
+    if (exactNameMatches.length === 1) {
+        const product = exactNameMatches[0];
+
+        console.log(
+            `✅ Exact product match | Query="${query}" | Product="${product.product_name}" | Confidence=100%`
+        );
+
+        return matchedProduct(
+            product,
+            1,
+            "exact_product_name"
+        );
     }
 
-    let best =
-        null;
+    if (exactNameMatches.length > 1) {
+        console.log(
+            `⚠️ Ambiguous exact product name rejected | Query="${query}" | Matches=${exactNameMatches.length}`
+        );
+        return null;
+    }
 
-    let bestScore =
-        0;
+    /* =====================================================
+       2. EXACT BRAND + PRODUCT NAME
+       Brand alone is NEVER accepted.
+       Example accepted: "Exit No Entry Cockroach Killer"
+       Example rejected: "Exit" / "Exit No Entry"
+    ===================================================== */
 
-    let bestCoverage =
-        0;
+    const exactBrandProductMatches =
+        products.filter(
+            product => {
+                const brand = normalizeText(product.brand_name);
+                const name = normalizeText(product.product_name);
 
-    for (
-        const product
-        of products
-    ) {
+                if (!brand || !name) {
+                    return false;
+                }
 
-        const phrases = [
-            normalizeText(
+                return `${brand} ${name}` === query;
+            }
+        );
+
+    if (exactBrandProductMatches.length === 1) {
+        const product = exactBrandProductMatches[0];
+
+        console.log(
+            `✅ Exact brand + product match | Query="${query}" | Product="${product.product_name}" | Confidence=100%`
+        );
+
+        return matchedProduct(
+            product,
+            1,
+            "exact_brand_product"
+        );
+    }
+
+    if (exactBrandProductMatches.length > 1) {
+        console.log(
+            `⚠️ Ambiguous brand + product match rejected | Query="${query}" | Matches=${exactBrandProductMatches.length}`
+        );
+        return null;
+    }
+
+    /* =====================================================
+       3. EXACT UNIQUE ALIAS
+       Aliases are NOT fuzzy-matched.
+       An alias is accepted only if exactly one product owns it.
+    ===================================================== */
+
+    const exactAliasMatches = [];
+
+    for (const product of products) {
+        const brandWords = new Set(
+            normalizeText(product.brand_name)
+                .split(/\s+/)
+                .filter(Boolean)
+        );
+
+        const aliases = splitAliases(product.aliases)
+            .filter(alias => {
+                const aliasWords = alias
+                    .split(/\s+/)
+                    .filter(Boolean);
+
+                /*
+                 * Do not treat a brand-only phrase as a product alias.
+                 * Example: brand="Exit No Entry", alias="Exit".
+                 */
+                const aliasIsOnlyBrand =
+                    aliasWords.length > 0 &&
+                    brandWords.size > 0 &&
+                    aliasWords.every(word => brandWords.has(word));
+
+                return !aliasIsOnlyBrand;
+            });
+
+        if (aliases.some(alias => alias === query)) {
+            exactAliasMatches.push(product);
+        }
+    }
+
+    if (exactAliasMatches.length === 1) {
+        const product = exactAliasMatches[0];
+
+        console.log(
+            `✅ Unique exact alias match | Query="${query}" | Product="${product.product_name}" | Confidence=100%`
+        );
+
+        return matchedProduct(
+            product,
+            1,
+            "exact_alias"
+        );
+    }
+
+    if (exactAliasMatches.length > 1) {
+        console.log(
+            `⚠️ Ambiguous exact alias rejected | Query="${query}" | Matches=${exactAliasMatches.length}`
+        );
+        return null;
+    }
+
+    /* =====================================================
+       4. FUZZY CONFIDENCE SEARCH
+       IMPORTANT: fuzzy search is against PRODUCT NAME ONLY.
+       Brand/category/description/package/aliases cannot
+       create a fuzzy product match.
+    ===================================================== */
+
+    let bestProduct = null;
+    let bestScore = 0;
+    let secondBestScore = 0;
+
+    for (const product of products) {
+        const score =
+            productPhraseConfidence(
+                query,
                 product.product_name
-            ),
-            ...(
-                product.searchTokens ||
-                []
-            )
-        ]
-            .filter(
-                Boolean
             );
 
-        let productBestScore =
-            0;
-
-        for (
-            const phrase
-            of phrases
-        ) {
-
-            const phraseWords =
-                new Set(
-                    phrase
-                        .split(
-                            /\s+/
-                        )
-                        .filter(
-                            Boolean
-                        )
-                );
-
-            const score =
-                queryWords
-                    .filter(
-                        word =>
-                            phraseWords.has(
-                                word
-                            )
-                    )
-                    .length;
-
-            if (
-                score >
-                productBestScore
-            ) {
-                productBestScore =
-                    score;
-            }
+        if (score > bestScore) {
+            secondBestScore = bestScore;
+            bestScore = score;
+            bestProduct = product;
         }
-
-        const coverage =
-            productBestScore /
-            queryWords.length;
-
-        if (
-            productBestScore >= 2 &&
-            coverage >= 0.75 &&
-            (
-                productBestScore >
-                bestScore ||
-
-                (
-                    productBestScore ===
-                    bestScore &&
-
-                    coverage >
-                    bestCoverage
-                )
-            )
-        ) {
-
-            best =
-                product;
-
-            bestScore =
-                productBestScore;
-
-            bestCoverage =
-                coverage;
+        else if (score > secondBestScore) {
+            secondBestScore = score;
         }
     }
 
-    return best;
+    /* Absolute 80% gate. */
+    if (
+        !bestProduct ||
+        bestScore < PRODUCT_MATCH_THRESHOLD
+    ) {
+        console.log(
+            `❌ Product rejected | Query="${query}" | Best confidence=${(bestScore * 100).toFixed(1)}%`
+        );
+        return null;
+    }
+
+    /*
+     * If two strong products are too close, reject instead of
+     * choosing whichever happens to appear first in the DB.
+     */
+    if (
+        secondBestScore >= PRODUCT_MATCH_THRESHOLD &&
+        (bestScore - secondBestScore) < PRODUCT_MATCH_AMBIGUITY_MARGIN
+    ) {
+        console.log(
+            `⚠️ Ambiguous product rejected | Query="${query}" | Best=${(bestScore * 100).toFixed(1)}% | Second=${(secondBestScore * 100).toFixed(1)}%`
+        );
+        return null;
+    }
+
+    console.log(
+        `✅ Product matched | Query="${query}" | Product="${bestProduct.product_name}" | Confidence=${(bestScore * 100).toFixed(1)}% | Source=product_name`
+    );
+
+    return matchedProduct(
+        bestProduct,
+        bestScore,
+        "product_name"
+    );
 }
+
+/* =========================================================
+   PARSE QUANTITY
+========================================================= */
 
 function parseQuantity(
     text
@@ -1004,19 +1518,37 @@ function parseQuantity(
             text || ""
         ).trim();
 
+
+    /*
+     * Quantity is accepted only at the END.
+     *
+     * This lets an exact product name ending in a number
+     * match before the quantity parser is used.
+     */
+
     const match =
         original.match(
             /(\d+(?:\.\d+)?)\s*(kg|kgs|kilo|kilos|g|gm|gms|gram|grams|ltr|l|lt|litre|litres|liter|liters|ml|pcs|pc|piece|pieces|nos|no|pkt|pk|pkts|packet|pack|packs)?\s*$/i
         );
 
-    if (!match) {
+
+    if (
+        !match
+    ) {
 
         return {
-            qty: 1,
-            unit: null,
-            matchedText: ""
+
+            qty:
+                1,
+
+            unit:
+                null,
+
+            matchedText:
+                ""
         };
     }
+
 
     return {
 
@@ -1035,6 +1567,11 @@ function parseQuantity(
     };
 }
 
+
+/* =========================================================
+   REMOVE QUANTITY FROM PRODUCT TEXT
+========================================================= */
+
 function cleanProductText(
     text,
     quantityInfo
@@ -1051,13 +1588,16 @@ function cleanProductText(
             original
         );
 
+
     if (
         !q.matchedText
     ) {
+
         return normalizeText(
             original
         );
     }
+
 
     return normalizeText(
         original.slice(
@@ -1068,6 +1608,11 @@ function cleanProductText(
     );
 }
 
+
+/* =========================================================
+   PARSE SINGLE ORDER
+========================================================= */
+
 function parseSingleOrder(
     text
 ) {
@@ -1077,7 +1622,10 @@ function parseSingleOrder(
             text || ""
         ).trim();
 
-    if (!original) {
+
+    if (
+        !original
+    ) {
 
         return {
             error:
@@ -1085,36 +1633,91 @@ function parseSingleOrder(
         };
     }
 
-    const exact =
-        currentProducts()
-            .filter(
-                isUsableProduct
-            )
-            .find(
-                p =>
-                    normalizeText(
-                        p.product_name
-                    ) ===
-                    normalizeText(
-                        original
-                    )
-            );
 
-    let q = {
-        qty: 1,
-        unit: null,
-        matchedText: ""
-    };
-
-    let productText =
+    const normalizedOriginal =
         normalizeText(
             original
         );
 
-    let product =
-        exact || null;
 
-    if (!product) {
+    /*
+     * FIRST:
+     * Check whether the entire user text is an exact
+     * product name.
+     *
+     * This protects product names ending in numbers.
+     *
+     * Example:
+     * "Product 2"
+     *
+     * should not automatically mean:
+     * product="Product", qty=2.
+     */
+
+    const exactWholeMatches =
+        currentProducts()
+            .filter(
+                isUsableProduct
+            )
+            .filter(
+                product =>
+                    normalizeText(
+                        product.product_name
+                    ) ===
+                    normalizedOriginal
+            );
+
+
+    let q = {
+
+        qty:
+            1,
+
+        unit:
+            null,
+
+        matchedText:
+            ""
+    };
+
+
+    let productText =
+        normalizedOriginal;
+
+
+    let product =
+        null;
+
+
+    if (
+        exactWholeMatches.length ===
+        1
+    ) {
+
+        product =
+            matchedProduct(
+                exactWholeMatches[0],
+                1,
+                "exact_product_name"
+            );
+    }
+
+    else if (
+        exactWholeMatches.length >
+        1
+    ) {
+
+        return {
+
+            error:
+                `Multiple products match "${original}". Please type the brand with the product name.`,
+
+            requestedText:
+                original
+        };
+    }
+
+    else {
 
         q =
             parseQuantity(
@@ -1127,11 +1730,28 @@ function parseSingleOrder(
                 q
             );
 
+
+        if (
+            !productText
+        ) {
+
+            return {
+
+                error:
+                    `Product name is missing: ${original}`,
+
+                requestedText:
+                    original
+            };
+        }
+
+
         product =
             findProduct(
                 productText
             );
     }
+
 
     if (
         !product ||
@@ -1150,10 +1770,41 @@ function parseSingleOrder(
         };
     }
 
+
+    /*
+     * Defense in depth:
+     * No fuzzy result below 80% may enter the cart.
+     */
+
+    if (
+        !Number.isFinite(
+            Number(
+                product.match_confidence
+            )
+        ) ||
+
+        Number(
+            product.match_confidence
+        ) <
+        PRODUCT_MATCH_THRESHOLD
+    ) {
+
+        return {
+
+            error:
+                `Product match is not confident enough: ${productText || original}`,
+
+            requestedText:
+                original
+        };
+    }
+
+
     const qty =
         Number(
             q.qty || 1
         );
+
 
     if (
         !Number.isFinite(qty) ||
@@ -1161,16 +1812,22 @@ function parseSingleOrder(
     ) {
 
         return {
+
             error:
-                `Invalid quantity for ${product.product_name}`
+                `Invalid quantity for ${product.product_name}`,
+
+            requestedText:
+                original
         };
     }
+
 
     const dimension =
         productDimension(
             product,
             q.unit
         );
+
 
     const unit =
         normalizeUnit(
@@ -1180,10 +1837,12 @@ function parseSingleOrder(
             dimension
         );
 
+
     const requestedDimension =
         unitDimension(
             unit
         );
+
 
     const raw =
         normalizeText(
@@ -1191,17 +1850,27 @@ function parseSingleOrder(
             ""
         );
 
+
     const hasWeight =
         /(^|[\/\s])(g|kg|gram|grams|kilogram|kilograms)([\/\s]|$)/i
-            .test(raw);
+            .test(
+                raw
+            );
+
 
     const hasVolume =
         /(^|[\/\s])(ml|l|ltr|litre|liter|litres|liters)([\/\s]|$)/i
-            .test(raw);
+            .test(
+                raw
+            );
+
 
     const hasCount =
         /(piece|pieces|pcs|packet|pack|pkt|set|pair|count|nos|number)/i
-            .test(raw);
+            .test(
+                raw
+            );
+
 
     if (
         requestedDimension ===
@@ -1217,6 +1886,7 @@ function parseSingleOrder(
         };
     }
 
+
     if (
         requestedDimension ===
         "volume" &&
@@ -1231,6 +1901,7 @@ function parseSingleOrder(
         };
     }
 
+
     if (
         requestedDimension !==
         "count" &&
@@ -1244,6 +1915,7 @@ function parseSingleOrder(
                 `${product.product_name} is sold by piece/packet.`
         };
     }
+
 
     const item = {
 
@@ -1267,6 +1939,15 @@ function parseSingleOrder(
                 product.selling_price
             ),
 
+        match_confidence:
+            Number(
+                product.match_confidence
+            ),
+
+        match_source:
+            product.match_source ||
+            null,
+
         qty,
 
         unit,
@@ -1282,6 +1963,7 @@ function parseSingleOrder(
             null
     };
 
+
     try {
 
         calculateItemTotal(
@@ -1296,6 +1978,7 @@ function parseSingleOrder(
     ) {
 
         return {
+
             error:
                 error.message,
 
@@ -1304,6 +1987,11 @@ function parseSingleOrder(
         };
     }
 }
+
+
+/* =========================================================
+   PARSE MULTIPLE ORDER ITEMS
+========================================================= */
 
 function parseOrderText(
     text
@@ -1316,8 +2004,8 @@ function parseOrderText(
             /[,;\n]+/
         )
         .map(
-            x =>
-                x.trim()
+            item =>
+                item.trim()
         )
         .filter(
             Boolean
@@ -1326,6 +2014,7 @@ function parseOrderText(
             parseSingleOrder
         );
 }
+
 
 /* =========================================================
    SESSION / CART
@@ -1543,7 +2232,18 @@ function isValidCartItem(
 
         Number(
             item.qty
-        ) > 0
+        ) > 0 &&
+
+        Number.isFinite(
+            Number(
+                item.match_confidence
+            )
+        ) &&
+
+        Number(
+            item.match_confidence
+        ) >=
+        PRODUCT_MATCH_THRESHOLD
     );
 }
 
@@ -4657,19 +5357,19 @@ function welcomeMessage(
 
         `📥 *How to Order*\n` +
 
-        `• Just Start Typing : *<Product Name> <Quantity Unit>*\n` +
+        `• Type: *<Product Name> <Quantity Unit>*\n` +
 
-        `• Example: *Whole Wheat Atta 5 Kgs, Milk 1pkt*\n\n` +
+        `• Example: *Whole Wheat Atta 5 Kg*\n\n` +
 
         `• You can also type just the product name or items separated by a comma.\n\n` +
 
-        `*Units*: kg, kgs, g, pcs, pc, ml, ltr, pkt\n\n` +
+        `*Units*: kg, g, pcs, ml, ltr, pkt\n\n` +
 
         `*The Street Smart Operating System*\n` +
 
-        `Powered By *CODE-Bot 2080*\n` +
+        `*Powered By CODE-Bot 2080*\n` +
 
-        `A Product of *2080 Technologies Private Limited*`
+        `*A Product of 2080 Technologies Private Limited*`
     );
 }
 
@@ -7296,7 +7996,8 @@ async function handleMessage(
     ) {
 
         let msg =
-            "❌ Product not found.";
+            "❌ Product not found with at least 80% confidence.\n\n" +
+            "Please type a more complete product name.";
 
         if (
             invalidItems.length
@@ -7322,7 +8023,7 @@ async function handleMessage(
         }
 
         msg +=
-            "\n\nExample:\n*Atta 2 Kg*";
+            "\n\nExample:\n*Whole Wheat Atta 2 Kg*";
 
         await sendText(
             phoneNumberId,
