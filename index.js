@@ -2,8 +2,12 @@ const express = require("express");
 const axios = require("axios");
 const mysql = require("mysql2/promise");
 const crypto = require("crypto");
+const path = require("path");
 const { AsyncLocalStorage } = require("node:async_hooks");
-require("dotenv").config();
+
+require("dotenv").config({
+    path: path.join(__dirname, ".env")
+});
 
 const app = express();
 
@@ -17,34 +21,24 @@ app.use(express.urlencoded({
     extended: true
 }));
 
-/* =========================================================
-   CONFIG
-========================================================= */
-
 const PORT = Number(
-    process.env.PORT ||
-    8000
+    process.env.PORT || 8000
 );
 
 const TOKEN =
-    process.env.TOKEN ||
-    "";
+    process.env.TOKEN || "";
 
 const MYTOKEN =
-    process.env.MYTOKEN ||
-    "";
+    process.env.MYTOKEN || "";
 
 const APP_SECRET =
-    process.env.APP_SECRET ||
-    "";
+    process.env.APP_SECRET || "";
 
 const GRAPH_VERSION =
-    process.env.GRAPH_VERSION ||
-    "v25.0";
+    process.env.GRAPH_VERSION || "v25.0";
 
 const GOOGLE_MAPS_API_KEY =
-    process.env.GOOGLE_MAPS_API_KEY ||
-    "";
+    process.env.GOOGLE_MAPS_API_KEY || "";
 
 const PUBLIC_BASE_URL =
     String(
@@ -70,48 +64,40 @@ const catalogCache =
 const conversationContexts =
     new Map();
 
-/* =========================================================
-   DATABASE
-========================================================= */
+const db = mysql.createPool({
+    host:
+        process.env.DB_HOST ||
+        "127.0.0.1",
 
-const db =
-    mysql.createPool({
+    user:
+        process.env.DB_USER ||
+        "",
 
-        host:
-            process.env.DB_HOST ||
-            "localhost",
+    password:
+        process.env.DB_PASSWORD ||
+        "",
 
-        user:
-            process.env.DB_USER ||
-            "root",
+    database:
+        process.env.DB_NAME ||
+        "",
 
-        password:
-            process.env.DB_PASSWORD ||
-            "",
+    waitForConnections:
+        true,
 
-        database:
-            process.env.DB_NAME ||
-            "code_bot_version1.1",
+    connectionLimit:
+        10,
 
-        waitForConnections:
-            true,
+    queueLimit:
+        0,
 
-        connectionLimit:
-            10,
-
-        queueLimit:
-            0,
-
-        decimalNumbers:
-            true
-    });
-
+    decimalNumbers:
+        true
+});
 
 async function query(
     sql,
     params = []
 ) {
-
     const [rows] =
         await db.execute(
             sql,
@@ -121,16 +107,14 @@ async function query(
     return rows;
 }
 
-
 /* =========================================================
-   CURRENT MERCHANT CONTEXT
+   MERCHANT CONTEXT
 ========================================================= */
 
 function merchant() {
 
     const value =
-        merchantContext
-            .getStore();
+        merchantContext.getStore();
 
     if (!value) {
         throw new Error(
@@ -166,19 +150,13 @@ function currentMerchantLogoUrl() {
     const genericEnv =
         process.env.MERCHANT_LOGO_URL;
 
-    if (
-        specificEnv
-    ) {
-
+    if (specificEnv) {
         return String(
             specificEnv
         ).trim();
     }
 
-    if (
-        genericEnv
-    ) {
-
+    if (genericEnv) {
         return String(
             genericEnv
         ).trim();
@@ -233,7 +211,7 @@ const STATES = {
 };
 
 /* =========================================================
-   TEXT / UNIT HELPERS
+   TEXT HELPERS
 ========================================================= */
 
 function normalizeText(
@@ -241,8 +219,7 @@ function normalizeText(
 ) {
 
     return String(
-        value ||
-        ""
+        value || ""
     )
         .toLowerCase()
         .trim()
@@ -481,8 +458,7 @@ function quantityForStock(
 
     const qty =
         Number(
-            item.qty ||
-            0
+            item.qty || 0
         );
 
     const unit =
@@ -533,6 +509,7 @@ function calculateItemTotal(
         !Number.isFinite(qty) ||
         qty <= 0
     ) {
+
         throw new Error(
             "Quantity must be greater than 0."
         );
@@ -542,6 +519,7 @@ function calculateItemTotal(
         !Number.isFinite(price) ||
         price <= 0
     ) {
+
         throw new Error(
             "Invalid product price."
         );
@@ -618,8 +596,7 @@ function formatQty(
         !Number.isFinite(n)
     ) {
         return String(
-            value ||
-            ""
+            value || ""
         );
     }
 
@@ -649,10 +626,10 @@ function buildSearchTokens(
     row
 ) {
 
-    const tokens =
+    const phrases =
         new Set();
 
-    function add(
+    function addPhrase(
         value
     ) {
 
@@ -665,69 +642,48 @@ function buildSearchTokens(
             return;
         }
 
-        tokens.add(
+        phrases.add(
             normalized
         );
-
-        normalized
-            .split(
-                /\s+/
-            )
-            .forEach(
-                word => {
-
-                    if (
-                        word.length >=
-                        2
-                    ) {
-                        tokens.add(
-                            word
-                        );
-                    }
-                }
-            );
     }
 
-    add(
+    addPhrase(
         row.product_name
     );
 
-    add(
-        row.brand_name
-    );
+    if (
+        normalizeText(
+            row.brand_name
+        ) &&
+        normalizeText(
+            row.product_name
+        )
+    ) {
 
-    add(
-        row.category_name
-    );
-
-    add(
-        row.description
-    );
-
-    add(
-        row.package_size
-    );
+        addPhrase(
+            `${row.brand_name} ${row.product_name}`
+        );
+    }
 
     String(
-        row.aliases ||
-        ""
+        row.aliases || ""
     )
         .split(
-            /[,|;]/
+            /[,|;]+/
         )
         .map(
-            x =>
-                x.trim()
+            value =>
+                value.trim()
         )
         .filter(
             Boolean
         )
         .forEach(
-            add
+            addPhrase
         );
 
     return [
-        ...tokens
+        ...phrases
     ];
 }
 
@@ -773,6 +729,44 @@ function findProduct(
         return null;
     }
 
+    const nonProductPhrases =
+        new Set([
+            "hi",
+            "hii",
+            "hiii",
+            "hello",
+            "hey",
+            "ok",
+            "okay",
+            "thanks",
+            "thank you",
+            "thankyou",
+            "yes",
+            "no",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "good night"
+        ]);
+
+    if (
+        nonProductPhrases.has(
+            q
+        )
+    ) {
+        return null;
+    }
+
+    if (
+        /https?:\/\/|www\./i.test(
+            String(
+                queryText || ""
+            )
+        )
+    ) {
+        return null;
+    }
+
     const products =
         currentProducts()
             .filter(
@@ -781,9 +775,9 @@ function findProduct(
 
     let found =
         products.find(
-            p =>
+            product =>
                 normalizeText(
-                    p.product_name
+                    product.product_name
                 ) === q
         );
 
@@ -793,15 +787,14 @@ function findProduct(
 
     found =
         products.find(
-            p =>
+            product =>
                 (
-                    p.searchTokens ||
+                    product.searchTokens ||
                     []
                 )
                     .some(
-                        token =>
-                            token &&
-                            token === q
+                        phrase =>
+                            phrase === q
                     )
         );
 
@@ -809,31 +802,7 @@ function findProduct(
         return found;
     }
 
-    found =
-        products.find(
-            p => {
-
-                const name =
-                    normalizeText(
-                        p.product_name
-                    );
-
-                if (!name) {
-                    return false;
-                }
-
-                return (
-                    name.includes(q) ||
-                    q.includes(name)
-                );
-            }
-        );
-
-    if (found) {
-        return found;
-    }
-
-    const words =
+    const queryWords =
         q
             .split(
                 /\s+/
@@ -843,56 +812,187 @@ function findProduct(
                     word.length >= 2
             );
 
+    if (
+        !queryWords.length
+    ) {
+        return null;
+    }
+
+    if (
+        queryWords.length === 1
+    ) {
+
+        const wanted =
+            queryWords[0];
+
+        if (
+            wanted.length < 2
+        ) {
+            return null;
+        }
+
+        const candidates =
+            [];
+
+        for (
+            const product
+            of products
+        ) {
+
+            const phrases = [
+                normalizeText(
+                    product.product_name
+                ),
+                ...(
+                    product.searchTokens ||
+                    []
+                )
+            ]
+                .filter(
+                    Boolean
+                );
+
+            const hasWholeWord =
+                phrases.some(
+                    phrase =>
+                        phrase
+                            .split(
+                                /\s+/
+                            )
+                            .includes(
+                                wanted
+                            )
+                );
+
+            if (
+                hasWholeWord
+            ) {
+                candidates.push(
+                    product
+                );
+            }
+        }
+
+        if (
+            !candidates.length
+        ) {
+            return null;
+        }
+
+        candidates.sort(
+            (
+                a,
+                b
+            ) =>
+                normalizeText(
+                    a.product_name
+                ).length -
+                normalizeText(
+                    b.product_name
+                ).length
+        );
+
+        return candidates[0];
+    }
+
     let best =
         null;
 
     let bestScore =
         0;
 
+    let bestCoverage =
+        0;
+
     for (
-        const p
+        const product
         of products
     ) {
 
-        const tokens =
-            p.searchTokens ||
-            [];
+        const phrases = [
+            normalizeText(
+                product.product_name
+            ),
+            ...(
+                product.searchTokens ||
+                []
+            )
+        ]
+            .filter(
+                Boolean
+            );
 
-        let score =
+        let productBestScore =
             0;
 
         for (
-            const word
-            of words
+            const phrase
+            of phrases
         ) {
 
+            const phraseWords =
+                new Set(
+                    phrase
+                        .split(
+                            /\s+/
+                        )
+                        .filter(
+                            Boolean
+                        )
+                );
+
+            const score =
+                queryWords
+                    .filter(
+                        word =>
+                            phraseWords.has(
+                                word
+                            )
+                    )
+                    .length;
+
             if (
-                tokens.includes(
-                    word
-                )
+                score >
+                productBestScore
             ) {
-                score++;
+                productBestScore =
+                    score;
             }
         }
 
+        const coverage =
+            productBestScore /
+            queryWords.length;
+
         if (
-            score >
-            bestScore
+            productBestScore >= 2 &&
+            coverage >= 0.75 &&
+            (
+                productBestScore >
+                bestScore ||
+
+                (
+                    productBestScore ===
+                    bestScore &&
+
+                    coverage >
+                    bestCoverage
+                )
+            )
         ) {
 
-            bestScore =
-                score;
-
             best =
-                p;
+                product;
+
+            bestScore =
+                productBestScore;
+
+            bestCoverage =
+                coverage;
         }
     }
 
-    return (
-        bestScore > 0
-            ? best
-            : null
-    );
+    return best;
 }
 
 function parseQuantity(
@@ -901,8 +1001,7 @@ function parseQuantity(
 
     const original =
         String(
-            text ||
-            ""
+            text || ""
         ).trim();
 
     const match =
@@ -943,8 +1042,7 @@ function cleanProductText(
 
     const original =
         String(
-            text ||
-            ""
+            text || ""
         ).trim();
 
     const q =
@@ -976,8 +1074,7 @@ function parseSingleOrder(
 
     const original =
         String(
-            text ||
-            ""
+            text || ""
         ).trim();
 
     if (!original) {
@@ -1015,8 +1112,7 @@ function parseSingleOrder(
         );
 
     let product =
-        exact ||
-        null;
+        exact || null;
 
     if (!product) {
 
@@ -1056,8 +1152,7 @@ function parseSingleOrder(
 
     const qty =
         Number(
-            q.qty ||
-            1
+            q.qty || 1
         );
 
     if (
@@ -1201,7 +1296,6 @@ function parseSingleOrder(
     ) {
 
         return {
-
             error:
                 error.message,
 
@@ -1216,8 +1310,7 @@ function parseOrderText(
 ) {
 
     return String(
-        text ||
-        ""
+        text || ""
     )
         .split(
             /[,;\n]+/
@@ -1251,9 +1344,11 @@ function getSession(
         sessions.set(
             key,
             {
-
                 status:
                     STATES.IDLE,
+
+                chatStarted:
+                    false,
 
                 cart:
                     [],
@@ -1305,8 +1400,7 @@ function getSession(
     if (
         Date.now() -
         Number(
-            session.lastActivity ||
-            0
+            session.lastActivity || 0
         ) >
         SESSION_TIMEOUT_MS
     ) {
@@ -1356,6 +1450,9 @@ function resetConversation(
     session.status =
         STATES.IDLE;
 
+    session.chatStarted =
+        false;
+
     session.cart =
         [];
 
@@ -1398,8 +1495,7 @@ function renumberCart(
 ) {
 
     (
-        session.cart ||
-        []
+        session.cart || []
     )
         .forEach(
             (
@@ -1457,8 +1553,7 @@ function cleanInvalidCartItems(
 
     session.cart =
         (
-            session.cart ||
-            []
+            session.cart || []
         )
             .filter(
                 isValidCartItem
@@ -1531,8 +1626,7 @@ function mergeSameProduct(
         existing.qty =
             Number(
                 (
-                    a +
-                    b
+                    a + b
                 ).toFixed(4)
             );
 
@@ -1570,8 +1664,7 @@ function mergeSameProduct(
         existing.qty =
             Number(
                 (
-                    a +
-                    b
+                    a + b
                 ).toFixed(4)
             );
 
@@ -1584,14 +1677,12 @@ function mergeSameProduct(
         const a =
             normalizeUnit(
                 existing.unit
-            ) ||
-            "pcs";
+            ) || "pcs";
 
         const b =
             normalizeUnit(
                 incoming.unit
-            ) ||
-            "pcs";
+            ) || "pcs";
 
         if (
             a !== b
@@ -1649,8 +1740,7 @@ function addToCart(
 
     for (
         const item
-        of items ||
-        []
+        of items || []
     ) {
 
         if (
@@ -1659,26 +1749,24 @@ function addToCart(
             )
         ) {
 
-            result.errors
-                .push(
-                    item?.error ||
-                    "Invalid product was not added."
-                );
+            result.errors.push(
+                item?.error ||
+                "Invalid product was not added."
+            );
 
             continue;
         }
 
         const existing =
-            session.cart
-                .find(
-                    x =>
-                        Number(
-                            x.vendor_product_id
-                        ) ===
-                        Number(
-                            item.vendor_product_id
-                        )
-                );
+            session.cart.find(
+                x =>
+                    Number(
+                        x.vendor_product_id
+                    ) ===
+                    Number(
+                        item.vendor_product_id
+                    )
+            );
 
         if (existing) {
 
@@ -1691,33 +1779,27 @@ function addToCart(
             if (
                 merged.error
             ) {
-
-                result.errors
-                    .push(
-                        merged.error
-                    );
+                result.errors.push(
+                    merged.error
+                );
             }
 
             else {
-
-                result.merged
-                    .push(
-                        existing
-                    );
+                result.merged.push(
+                    existing
+                );
             }
         }
 
         else {
 
-            session.cart
-                .push({
-                    ...item
-                });
+            session.cart.push({
+                ...item
+            });
 
-            result.added
-                .push(
-                    item
-                );
+            result.added.push(
+                item
+            );
         }
     }
 
@@ -1732,12 +1814,10 @@ function cartOperationNote(
     operation
 ) {
 
-    const lines =
-        [];
+    const lines = [];
 
     if (
-        operation.added
-            ?.length
+        operation.added?.length
     ) {
 
         lines.push(
@@ -1747,16 +1827,13 @@ function cartOperationNote(
                         x =>
                             x.product_name
                     )
-                    .join(
-                        ", "
-                    )
+                    .join(", ")
             }`
         );
     }
 
     if (
-        operation.merged
-            ?.length
+        operation.merged?.length
     ) {
 
         lines.push(
@@ -1766,16 +1843,13 @@ function cartOperationNote(
                         x =>
                             x.product_name
                     )
-                    .join(
-                        ", "
-                    )
+                    .join(", ")
             }`
         );
     }
 
     if (
-        operation.errors
-            ?.length
+        operation.errors?.length
     ) {
 
         lines.push(
@@ -1793,6 +1867,10 @@ function cartOperationNote(
     );
 }
 
+/* =========================================================
+   CLEAN BILL UI
+========================================================= */
+
 function buildBill(
     items,
     title
@@ -1800,8 +1878,7 @@ function buildBill(
 
     const valid =
         (
-            items ||
-            []
+            items || []
         )
             .filter(
                 isValidCartItem
@@ -1828,8 +1905,7 @@ function buildBill(
 
             const unit =
                 String(
-                    item.unit ||
-                    ""
+                    item.unit || ""
                 ).trim();
 
             const dimension =
@@ -1840,9 +1916,11 @@ function buildBill(
                 );
 
             const rateUnit =
-                dimension === "weight"
+                dimension ===
+                "weight"
                     ? "kg"
-                    : dimension === "volume"
+                    : dimension ===
+                      "volume"
                         ? "ltr"
                         : (
                             unit ||
@@ -1851,21 +1929,13 @@ function buildBill(
 
             const rate =
                 Number(
-                    item.unit_price ||
-                    0
-                )
-                    .toFixed(
-                        2
-                    );
+                    item.unit_price || 0
+                ).toFixed(2);
 
             const amount =
                 Number(
-                    item.total ||
-                    0
-                )
-                    .toFixed(
-                        2
-                    );
+                    item.total || 0
+                ).toFixed(2);
 
             lines.push(
                 `*${index + 1}. ${item.product_name}*`
@@ -1883,14 +1953,11 @@ function buildBill(
                 `Amount: *₹${amount}*`
             );
 
-            lines.push(
-                ""
-            );
+            lines.push("");
 
             total +=
                 Number(
-                    item.total ||
-                    0
+                    item.total || 0
                 );
         }
     );
@@ -1904,16 +1971,13 @@ function buildBill(
     );
 
     return {
+
         text:
-            lines.join(
-                "\n"
-            ),
+            lines.join("\n"),
 
         total:
             Number(
-                total.toFixed(
-                    2
-                )
+                total.toFixed(2)
             )
     };
 }
@@ -1924,16 +1988,15 @@ function removeCartItem(
 ) {
 
     const index =
-        session.cart
-            .findIndex(
-                x =>
-                    Number(
-                        x.cartId
-                    ) ===
-                    Number(
-                        itemNo
-                    )
-            );
+        session.cart.findIndex(
+            x =>
+                Number(
+                    x.cartId
+                ) ===
+                Number(
+                    itemNo
+                )
+        );
 
     if (
         index < 0
@@ -1946,11 +2009,10 @@ function removeCartItem(
     }
 
     const [removed] =
-        session.cart
-            .splice(
-                index,
-                1
-            );
+        session.cart.splice(
+            index,
+            1
+        );
 
     renumberCart(
         session
@@ -1970,16 +2032,15 @@ function editCartItem(
 ) {
 
     const item =
-        session.cart
-            .find(
-                x =>
-                    Number(
-                        x.cartId
-                    ) ===
-                    Number(
-                        itemNo
-                    )
-            );
+        session.cart.find(
+            x =>
+                Number(
+                    x.cartId
+                ) ===
+                Number(
+                    itemNo
+                )
+        );
 
     if (!item) {
 
@@ -2056,9 +2117,8 @@ function editCartItem(
         item
     };
 }
-
 /* =========================================================
-   MERCHANT / PRODUCT CATALOG
+   MERCHANT + CATALOG
 ========================================================= */
 
 async function getMerchantByNumber(
@@ -2074,20 +2134,22 @@ async function getMerchantByNumber(
                 c.phone_number_id,
                 c.display_number,
                 c.status AS channel_status,
-
                 m.store_name,
                 m.registration_status
 
             FROM cb_merchant_channels c
 
             INNER JOIN cb_merchant_registration m
-                ON m.merchant_id = c.merchant_id
+                ON m.merchant_id =
+                   c.merchant_id
 
             WHERE c.phone_number_id = ?
 
-              AND c.channel_type = 'whatsapp'
+              AND c.channel_type =
+                  'whatsapp'
 
-              AND c.status = 'active'
+              AND c.status =
+                  'active'
 
               AND m.registration_status
                   IN (
@@ -2139,7 +2201,6 @@ async function loadMerchantCatalog(
         cached.loadedAt <
         CATALOG_CACHE_MS
     ) {
-
         return cached;
     }
 
@@ -2264,8 +2325,7 @@ async function loadMerchantCatalog(
                         ),
                         '||',
                         1
-                    )
-                        AS image_key
+                    ) AS image_key
 
                 FROM cb_merchant_product_images
 
@@ -2274,6 +2334,7 @@ async function loadMerchantCatalog(
 
                 GROUP BY merchant_product_id
             ) pi
+
                 ON pi.merchant_product_id =
                    p.merchant_product_id
 
@@ -2314,18 +2375,14 @@ async function loadMerchantCatalog(
               AND
               (
                   p.stock_tracking = 0
-
                   OR
-
                   p.stock_quantity > 0
               )
 
               AND
               (
                   mp.product_id IS NULL
-
                   OR
-
                   mp.status = 'active'
               )
 
@@ -2342,7 +2399,6 @@ async function loadMerchantCatalog(
         productRows
             .map(
                 row => ({
-
                     ...row,
 
                     selling_price:
@@ -2421,8 +2477,95 @@ async function loadMerchantCatalog(
     return result;
 }
 
+function createLightweightMerchantContext(
+    channel
+) {
+
+    return {
+
+        merchantId:
+            Number(
+                channel.merchant_id
+            ),
+
+        channelId:
+            Number(
+                channel.channel_id
+            ),
+
+        phoneNumberId:
+            String(
+                channel.phone_number_id
+            ),
+
+        shopName:
+            channel.store_name ||
+            "CODE-Bot Store",
+
+        registrationStatus:
+            channel.registration_status,
+
+        channel,
+
+        products:
+            [],
+
+        units:
+            [],
+
+        catalogLoaded:
+            false,
+
+        loadedAt:
+            0
+    };
+}
+
+async function ensureCurrentCatalogLoaded() {
+
+    const context =
+        merchant();
+
+    if (
+        context.catalogLoaded
+    ) {
+        return context;
+    }
+
+    if (
+        !context.channel
+    ) {
+
+        throw new Error(
+            "Merchant channel context missing for catalog load."
+        );
+    }
+
+    const loaded =
+        await loadMerchantCatalog(
+            context.channel
+        );
+
+    context.products =
+        loaded.products ||
+        [];
+
+    context.units =
+        loaded.units ||
+        [];
+
+    context.loadedAt =
+        loaded.loadedAt ||
+        Date.now();
+
+    context.catalogLoaded =
+        true;
+
+    return context;
+}
+
 /* =========================================================
-   CUSTOMER / CONVERSATION / MESSAGE DB
+   CUSTOMER + CHAT DB
 ========================================================= */
 
 async function ensureCustomer(
@@ -2433,8 +2576,11 @@ async function ensureCustomer(
         await query(
             `
             SELECT customer_id
+
             FROM customers
+
             WHERE whatsapp_number = ?
+
             LIMIT 1
             `,
             [
@@ -2456,6 +2602,7 @@ async function ensureCustomer(
                 `
                 INSERT INTO customers
                     (whatsapp_number)
+
                 VALUES (?)
                 `,
                 [
@@ -2463,8 +2610,7 @@ async function ensureCustomer(
                 ]
             );
 
-        return result
-            .insertId;
+        return result.insertId;
     }
 
     catch (
@@ -2482,8 +2628,11 @@ async function ensureCustomer(
             await query(
                 `
                 SELECT customer_id
+
                 FROM customers
+
                 WHERE whatsapp_number = ?
+
                 LIMIT 1
                 `,
                 [
@@ -2523,7 +2672,8 @@ async function ensureConversation(
 
               AND status = 'open'
 
-            ORDER BY conversation_id DESC
+            ORDER BY
+                conversation_id DESC
 
             LIMIT 1
             `,
@@ -2589,8 +2739,7 @@ async function ensureConversation(
             ]
         );
 
-    return result
-        .insertId;
+    return result.insertId;
 }
 
 function conversationKey(
@@ -2658,8 +2807,7 @@ function inboundText(
     ) {
 
         return String(
-            message.text
-                ?.body ||
+            message.text?.body ||
             ""
         );
     }
@@ -2767,8 +2915,7 @@ async function isMessageAlreadySaved(
         );
 
     return (
-        rows.length >
-        0
+        rows.length > 0
     );
 }
 
@@ -2823,8 +2970,7 @@ async function claimInboundMessage(
                 message?.id ||
                 null,
 
-                message?.context
-                    ?.id ||
+                message?.context?.id ||
                 null,
 
                 message?.type ||
@@ -2837,8 +2983,7 @@ async function claimInboundMessage(
                 null,
 
                 JSON.stringify(
-                    message ||
-                    {}
+                    message || {}
                 ),
 
                 providerTimestamp
@@ -2867,8 +3012,7 @@ async function claimInboundMessage(
 
     return (
         Number(
-            result.affectedRows ||
-            0
+            result.affectedRows || 0
         ) === 1
     );
 }
@@ -2952,8 +3096,7 @@ async function saveOutboundMessage(
             null,
 
             JSON.stringify(
-                payload ||
-                {}
+                payload || {}
             )
         ]
     );
@@ -2968,8 +3111,7 @@ async function updateMessageStatus(
 
     const state =
         String(
-            status?.status ||
-            ""
+            status?.status || ""
         );
 
     if (
@@ -3073,7 +3215,7 @@ async function updateMessageStatus(
 }
 
 /* =========================================================
-   WHATSAPP SEND
+   SEND WHATSAPP
 ========================================================= */
 
 async function sendWhatsApp(
@@ -3084,6 +3226,7 @@ async function sendWhatsApp(
 ) {
 
     if (!TOKEN) {
+
         throw new Error(
             "TOKEN missing in .env"
         );
@@ -3105,6 +3248,7 @@ async function sendWhatsApp(
             data,
             {
                 headers: {
+
                     Authorization:
                         `Bearer ${TOKEN}`,
 
@@ -3126,21 +3270,14 @@ async function sendWhatsApp(
             );
 
         if (
-            context
-                ?.conversationId
+            context?.conversationId
         ) {
 
             await saveOutboundMessage(
-                context
-                    .conversationId,
-
+                context.conversationId,
                 response,
-
-                payload.type ||
-                "text",
-
+                payload.type || "text",
                 messageText,
-
                 data
             );
         }
@@ -3194,8 +3331,7 @@ function getPublicMediaUrl(
 
     const key =
         String(
-            storageKey ||
-            ""
+            storageKey || ""
         ).trim();
 
     if (!key) {
@@ -3230,8 +3366,7 @@ async function sendImage(
 
     const url =
         String(
-            imageUrl ||
-            ""
+            imageUrl || ""
         ).trim();
 
     if (!url) {
@@ -3246,13 +3381,13 @@ async function sendImage(
                 "image",
 
             image: {
+
                 link:
                     url,
 
                 caption:
                     String(
-                        caption ||
-                        ""
+                        caption || ""
                     ).slice(
                         0,
                         1024
@@ -3260,8 +3395,7 @@ async function sendImage(
             }
         },
         String(
-            caption ||
-            ""
+            caption || ""
         )
     );
 }
@@ -3280,8 +3414,7 @@ async function sendProductImages(
 
     for (
         const item
-        of items ||
-        []
+        of items || []
     ) {
 
         if (
@@ -3312,15 +3445,13 @@ async function sendProductImages(
         if (
             item.image_key
         ) {
-
             unique.push(
                 item
             );
         }
 
         if (
-            unique.length >=
-            3
+            unique.length >= 3
         ) {
             break;
         }
@@ -3346,7 +3477,10 @@ async function sendProductImages(
                 phoneNumberId,
                 from,
                 imageUrl,
-                `🛍️ *${item.product_name}*\n₹${Number(item.selling_price).toFixed(2)}`
+
+                `🛍️ *${item.product_name}*\n₹${Number(
+                    item.selling_price
+                ).toFixed(2)}`
             );
         }
 
@@ -3372,8 +3506,7 @@ function sendButtons(
 
     const safeButtons =
         (
-            buttons ||
-            []
+            buttons || []
         )
             .slice(
                 0,
@@ -3385,6 +3518,7 @@ function sendButtons(
                         "reply",
 
                     reply: {
+
                         id:
                             String(
                                 button.id
@@ -3409,6 +3543,7 @@ function sendButtons(
                 "interactive",
 
             interactive: {
+
                 type:
                     "button",
 
@@ -3435,7 +3570,7 @@ function sendButtons(
 }
 
 /* =========================================================
-   ADDRESS / DISTANCE
+   ADDRESS
 ========================================================= */
 
 async function getAddress(
@@ -3533,8 +3668,7 @@ async function saveAddress(
 ) {
 
     const data =
-        addressData ||
-        {};
+        addressData || {};
 
     await query(
         `
@@ -3617,8 +3751,7 @@ async function saveAddress(
             ]
         );
 
-    return result
-        .insertId;
+    return result.insertId;
 }
 
 async function updateAddressCoordinates(
@@ -3683,25 +3816,15 @@ async function getMerchantDeliveryProfile(
             `
             SELECT
                 ma.address_id,
-
                 ma.address_line1,
-
                 ma.address_line2,
-
                 ma.landmark,
-
                 ma.city,
-
                 ma.state,
-
                 ma.pincode,
-
                 ma.country,
-
                 ma.latitude,
-
                 ma.longitude,
-
                 bg.max_delivery_distance_km
 
             FROM cb_merchant_registration mr
@@ -3801,14 +3924,12 @@ function addressComponent(
 
     const part =
         (
-            components ||
-            []
+            components || []
         )
             .find(
                 x =>
                     (
-                        x.types ||
-                        []
+                        x.types || []
                     )
                         .includes(
                             type
@@ -3828,8 +3949,7 @@ async function geocodeAddress(
 
     const address =
         String(
-            addressText ||
-            ""
+            addressText || ""
         ).trim();
 
     if (!address) {
@@ -3853,9 +3973,12 @@ async function geocodeAddress(
             "https://maps.googleapis.com/maps/api/geocode/json",
             {
                 params: {
+
                     address,
+
                     key:
                         GOOGLE_MAPS_API_KEY,
+
                     region:
                         "in"
                 },
@@ -3866,14 +3989,12 @@ async function geocodeAddress(
         );
 
     const payload =
-        response.data ||
-        {};
+        response.data || {};
 
     if (
         payload.status !==
         "OK" ||
-        !payload.results
-            ?.length
+        !payload.results?.length
     ) {
 
         throw new Error(
@@ -3885,8 +4006,7 @@ async function geocodeAddress(
         payload.results[0];
 
     const location =
-        result.geometry
-            ?.location ||
+        result.geometry?.location ||
         {};
 
     const latitude =
@@ -3960,12 +4080,8 @@ async function reverseGeocodeCoordinates(
         );
 
     if (
-        !Number.isFinite(
-            lat
-        ) ||
-        !Number.isFinite(
-            lng
-        )
+        !Number.isFinite(lat) ||
+        !Number.isFinite(lng)
     ) {
 
         throw new Error(
@@ -3978,6 +4094,7 @@ async function reverseGeocodeCoordinates(
     ) {
 
         return {
+
             address:
                 `Pinned location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
 
@@ -4003,6 +4120,7 @@ async function reverseGeocodeCoordinates(
             "https://maps.googleapis.com/maps/api/geocode/json",
             {
                 params: {
+
                     latlng:
                         `${lat},${lng}`,
 
@@ -4016,17 +4134,16 @@ async function reverseGeocodeCoordinates(
         );
 
     const payload =
-        response.data ||
-        {};
+        response.data || {};
 
     if (
         payload.status !==
         "OK" ||
-        !payload.results
-            ?.length
+        !payload.results?.length
     ) {
 
         return {
+
             address:
                 `Pinned location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
 
@@ -4051,6 +4168,7 @@ async function reverseGeocodeCoordinates(
         payload.results[0];
 
     return {
+
         address:
             result.formatted_address ||
             `Pinned location: ${lat.toFixed(6)}, ${lng.toFixed(6)}`,
@@ -4118,12 +4236,10 @@ function haversineDistanceKm(
 
     const a =
         Math.sin(
-            dLat /
-            2
+            dLat / 2
         ) *
         Math.sin(
-            dLat /
-            2
+            dLat / 2
         ) +
 
         Math.cos(
@@ -4139,13 +4255,11 @@ function haversineDistanceKm(
         ) *
 
         Math.sin(
-            dLon /
-            2
+            dLon / 2
         ) *
 
         Math.sin(
-            dLon /
-            2
+            dLon / 2
         );
 
     const c =
@@ -4153,14 +4267,12 @@ function haversineDistanceKm(
         Math.atan2(
             Math.sqrt(a),
             Math.sqrt(
-                1 -
-                a
+                1 - a
             )
         );
 
     return (
-        earthRadiusKm *
-        c
+        earthRadiusKm * c
     );
 }
 
@@ -4216,10 +4328,7 @@ async function validateDeliveryDistance(
 
         distanceKm:
             Number(
-                distanceKm
-                    .toFixed(
-                        2
-                    )
+                distanceKm.toFixed(2)
             ),
 
         maxDistanceKm:
@@ -4331,8 +4440,7 @@ function setSessionAddress(
         );
 
     session.deliveryDistanceKm =
-        distanceInfo
-            ?.distanceKm ??
+        distanceInfo?.distanceKm ??
         null;
 }
 
@@ -4392,7 +4500,12 @@ async function askAddressChoice(
     await sendButtons(
         phoneNumberId,
         from,
-        `📍 *Delivery Address*\n\nPrevious address:\n${savedAddress.address}\n\nWhich address do you want to use for this order?`,
+
+        `📍 *Delivery Address*\n\n` +
+        `Previous address:\n` +
+        `${savedAddress.address}\n\n` +
+        `Which address do you want to use for this order?`,
+
         [
             {
                 id:
@@ -4411,6 +4524,10 @@ async function askAddressChoice(
         ]
     );
 }
+
+/* =========================================================
+   WELCOME
+========================================================= */
 
 async function getMerchantWelcomeLocation(
     merchantId
@@ -4449,10 +4566,8 @@ async function getMerchantWelcomeLocation(
     ) {
 
         return {
-            street:
-                "",
-            city:
-                ""
+            street: "",
+            city: ""
         };
     }
 
@@ -4461,8 +4576,7 @@ async function getMerchantWelcomeLocation(
 
     const firstLine =
         String(
-            row.address_line1 ||
-            ""
+            row.address_line1 || ""
         )
             .split(
                 /\r?\n/
@@ -4486,8 +4600,7 @@ async function getMerchantWelcomeLocation(
 
     const rawCity =
         String(
-            row.city ||
-            ""
+            row.city || ""
         ).trim();
 
     const city =
@@ -4513,14 +4626,12 @@ function welcomeMessage(
 
     const street =
         String(
-            location.street ||
-            ""
+            location.street || ""
         ).trim();
 
     const city =
         String(
-            location.city ||
-            ""
+            location.city || ""
         ).trim();
 
     const locationLine =
@@ -4531,9 +4642,7 @@ function welcomeMessage(
             .filter(
                 Boolean
             )
-            .join(
-                ", "
-            );
+            .join(", ");
 
     return (
         `*Welcome* to *${currentShopName()}*\n` +
@@ -4570,10 +4679,8 @@ async function sendWelcomeMessage(
 ) {
 
     let location = {
-        street:
-            "",
-        city:
-            ""
+        street: "",
+        city: ""
     };
 
     try {
@@ -4638,7 +4745,7 @@ async function sendWelcomeMessage(
 }
 
 /* =========================================================
-   DISPLAY FLOW
+   BILLS
 ========================================================= */
 
 async function sendPreOrderBill(
@@ -4715,8 +4822,7 @@ async function sendPreOrderBill(
     ];
 
     if (
-        body.length >
-        900
+        body.length > 900
     ) {
 
         await sendText(
@@ -4728,7 +4834,10 @@ async function sendPreOrderBill(
         await sendButtons(
             phoneNumberId,
             from,
-            `🛒 *Cart Total: ₹${bill.total.toFixed(2)}*\n\nWhat would you like to do?`,
+
+            `🛒 *Cart Total: ₹${bill.total.toFixed(2)}*\n\n` +
+            `What would you like to do?`,
+
             buttons
         );
     }
@@ -4777,14 +4886,13 @@ async function sendEditMenu(
         "✏️ *Edit Item*\n\n" +
         "Please type the item number you want to edit.\n\n";
 
-    session.cart
-        .forEach(
-            item => {
+    session.cart.forEach(
+        item => {
 
-                body +=
-                    `${item.cartId}. ${item.product_name} - ${formatQty(item.qty)} ${item.unit}\n`;
-            }
-        );
+            body +=
+                `${item.cartId}. ${item.product_name} - ${formatQty(item.qty)} ${item.unit}\n`;
+        }
+    );
 
     body +=
         "\nExample: *1*";
@@ -4808,6 +4916,7 @@ async function sendEditAction(
     await sendButtons(
         phoneNumberId,
         from,
+
         `✏️ Editing item ${item.cartId}\n\n` +
 
         `Product: *${item.product_name}*\n` +
@@ -4815,6 +4924,7 @@ async function sendEditAction(
         `Current Quantity: *${formatQty(item.qty)} ${item.unit}*\n\n` +
 
         `Choose what you want to do:`,
+
         [
             {
                 id:
@@ -4863,6 +4973,7 @@ async function sendFinalBill(
         await sendText(
             phoneNumberId,
             from,
+
             "❌ No valid product is available to generate the final bill.\n\n" +
             "Type *Chacha* to start again."
         );
@@ -4889,6 +5000,7 @@ async function sendFinalBill(
         await sendText(
             phoneNumberId,
             from,
+
             "📍 Please select or enter a delivery address before payment."
         );
 
@@ -4902,8 +5014,13 @@ async function sendFinalBill(
         );
 
     let body =
-        `🏪 *${currentShopName()}*\n\n${bill.text}` +
-        `\n\n📍 *Delivery Address*\n${session.address}`;
+        `🏪 *${currentShopName()}*\n\n` +
+
+        `${bill.text}` +
+
+        `\n\n📍 *Delivery Address*\n` +
+
+        `${session.address}`;
 
     if (
         Number.isFinite(
@@ -4914,7 +5031,9 @@ async function sendFinalBill(
     ) {
 
         body +=
-            `\n\n📏 Distance from store: *${Number(session.deliveryDistanceKm).toFixed(2)} km*`;
+            `\n\n📏 Distance from store: *${Number(
+                session.deliveryDistanceKm
+            ).toFixed(2)} km*`;
     }
 
     body +=
@@ -4931,8 +5050,7 @@ async function sendFinalBill(
     ];
 
     if (
-        body.length >
-        900
+        body.length > 900
     ) {
 
         await sendText(
@@ -4944,9 +5062,13 @@ async function sendFinalBill(
         await sendButtons(
             phoneNumberId,
             from,
+
             `💰 *Total: ₹${bill.total.toFixed(2)}*\n` +
+
             `📍 Delivery address confirmed.\n\n` +
+
             `Tap below to continue.`,
+
             buttons
         );
     }
@@ -4980,7 +5102,8 @@ async function getPendingStatusId(
 
             FROM order_status
 
-            WHERE status_code = 'pending'
+            WHERE status_code =
+                  'pending'
 
             LIMIT 1
             `
@@ -5019,8 +5142,7 @@ async function saveOrder(
         );
 
     if (
-        bill.total <=
-        0
+        bill.total <= 0
     ) {
 
         throw new Error(
@@ -5029,13 +5151,11 @@ async function saveOrder(
     }
 
     const connection =
-        await db
-            .getConnection();
+        await db.getConnection();
 
     try {
 
-        await connection
-            .beginTransaction();
+        await connection.beginTransaction();
 
         const statusId =
             await getPendingStatusId(
@@ -5043,17 +5163,14 @@ async function saveOrder(
             );
 
         const orderNumber =
-            `ORD${Date.now()}${
-                Math.floor(
-                    Math.random() *
-                    10000
-                )
-                    .toString()
-                    .padStart(
-                        4,
-                        "0"
-                    )
-            }`;
+            `ORD${Date.now()}${Math.floor(
+                Math.random() * 10000
+            )
+                .toString()
+                .padStart(
+                    4,
+                    "0"
+                )}`;
 
         const [orderResult] =
             await connection.execute(
@@ -5177,8 +5294,7 @@ async function saveOrder(
 
                 normalizeText(
                     dbProduct.product_name
-                ) ===
-                ""
+                ) === ""
             ) {
 
                 throw new Error(
@@ -5516,18 +5632,19 @@ async function saveOrder(
                 currentMerchantId(),
 
                 Math.round(
-                    bill.total *
-                    100
+                    bill.total * 100
                 )
             ]
         );
 
-        await connection
-            .commit();
+        await connection.commit();
 
         return {
+
             orderId,
+
             orderNumber,
+
             total:
                 bill.total
         };
@@ -5537,19 +5654,16 @@ async function saveOrder(
         error
     ) {
 
-        await connection
-            .rollback();
+        await connection.rollback();
 
         throw error;
     }
 
     finally {
 
-        connection
-            .release();
+        connection.release();
     }
 }
-
 async function placePendingOrder(
     phoneNumberId,
     from,
@@ -5637,6 +5751,7 @@ async function placePendingOrder(
         await sendText(
             phoneNumberId,
             from,
+
             `✅ *Order Placed! (Payment Pending)*\n\n` +
 
             `🧾 Order No: *${result.orderNumber}*\n` +
@@ -5666,6 +5781,7 @@ async function placePendingOrder(
         await sendText(
             phoneNumberId,
             from,
+
             `❌ Could not place your order: ${error.message}`
         );
     }
@@ -5693,8 +5809,7 @@ function verifySignature(
         String(
             req.get(
                 "x-hub-signature-256"
-            ) ||
-            ""
+            ) || ""
         );
 
     const expected =
@@ -5725,6 +5840,7 @@ function verifySignature(
     return (
         a.length ===
         b.length &&
+
         crypto.timingSafeEqual(
             a,
             b
@@ -5733,7 +5849,7 @@ function verifySignature(
 }
 
 /* =========================================================
-   VERIFY WEBHOOK
+   WEBHOOK VERIFY
 ========================================================= */
 
 app.get(
@@ -5773,10 +5889,9 @@ app.get(
                 );
         }
 
-        return res
-            .sendStatus(
-                403
-            );
+        return res.sendStatus(
+            403
+        );
     }
 );
 
@@ -5791,8 +5906,7 @@ async function handleMessage(
 
     const from =
         String(
-            message.from ||
-            ""
+            message.from || ""
         );
 
     if (!from) {
@@ -5820,8 +5934,7 @@ async function handleMessage(
 
         text =
             String(
-                message.text
-                    ?.body ||
+                message.text?.body ||
                 ""
             ).trim();
     }
@@ -5982,7 +6095,8 @@ async function handleMessage(
     }
 
     /* =====================================================
-       WELCOME: ONLY Chacha OR chacha
+       STRICT WELCOME
+       ONLY EXACT Chacha / chacha
     ===================================================== */
 
     if (
@@ -5998,6 +6112,9 @@ async function handleMessage(
             false
         );
 
+        session.chatStarted =
+            true;
+
         await sendWelcomeMessage(
             phoneNumberId,
             from
@@ -6007,7 +6124,27 @@ async function handleMessage(
     }
 
     /* =====================================================
-       COMPLETED ORDER
+       IMPORTANT:
+       NOTHING ELSE CAN PROCEED
+       BEFORE CHACHA
+    ===================================================== */
+
+    if (
+        !session.chatStarted
+    ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+
+            "To Proceed Chat just Type *Chacha*."
+        );
+
+        return;
+    }
+
+    /* =====================================================
+       COMPLETED
     ===================================================== */
 
     if (
@@ -6018,7 +6155,9 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "✅ Your previous order is already completed.\n\n" +
+
             "Type *Chacha* to start a new order."
         );
 
@@ -6026,7 +6165,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       ADD MORE ITEMS
+       MORE ITEM
     ===================================================== */
 
     if (
@@ -6042,6 +6181,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6054,7 +6194,9 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "➕ Please type the next item.\n\n" +
+
             "Example: *Milk 2 Ltr*"
         );
 
@@ -6062,7 +6204,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       EDIT ITEM
+       EDIT
     ===================================================== */
 
     if (
@@ -6078,6 +6220,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6094,7 +6237,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       CONFIRM CART
+       CONFIRM
     ===================================================== */
 
     if (
@@ -6116,7 +6259,9 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "🛒 No valid products are available to confirm.\n\n" +
+
                 "Type *Chacha* to start again."
             );
 
@@ -6150,6 +6295,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6171,7 +6317,9 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "📍 Previous address was not found.\n\n" +
+
                 "Please send your current complete address, or share your WhatsApp location pin."
             );
 
@@ -6197,7 +6345,7 @@ async function handleMessage(
                 session.status =
                     STATES.AWAITING_ADDRESS_CHOICE;
 
-                let message =
+                let msg =
                     `🚫 *Previous address is outside the delivery area.*\n\n` +
 
                     `📏 Distance: *${distance.distanceKm.toFixed(2)} km*`;
@@ -6206,17 +6354,17 @@ async function handleMessage(
                     distance.maxDistanceKm != null
                 ) {
 
-                    message +=
+                    msg +=
                         `\n🚚 Delivery limit: *${distance.maxDistanceKm.toFixed(2)} km*`;
                 }
 
-                message +=
+                msg +=
                     "\n\nPlease use your current address.";
 
                 await sendButtons(
                     phoneNumberId,
                     from,
-                    message,
+                    msg,
                     [
                         {
                             id:
@@ -6240,7 +6388,9 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `✅ Previous address selected.\n` +
+
                 `📏 Distance from store: *${distance.distanceKm.toFixed(2)} km*`
             );
 
@@ -6261,9 +6411,13 @@ async function handleMessage(
             await sendButtons(
                 phoneNumberId,
                 from,
+
                 `⚠️ Could not verify the previous address distance.\n\n` +
+
                 `${error.message}\n\n` +
+
                 `Please use your current address.`,
+
                 [
                     {
                         id:
@@ -6280,7 +6434,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       CURRENT ADDRESS
+       CURRENT ADDRESS BUTTON
     ===================================================== */
 
     if (
@@ -6295,15 +6449,15 @@ async function handleMessage(
             ![
                 STATES.AWAITING_ADDRESS_CHOICE,
                 STATES.FINAL
-            ]
-                .includes(
-                    session.status
-                )
+            ].includes(
+                session.status
+            )
         ) {
 
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6331,11 +6485,32 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "📍 *Current Address*\n\n" +
 
             "Please send your complete current delivery address.\n\n" +
 
             "You can also share your WhatsApp location pin for a faster distance check."
+        );
+
+        return;
+    }
+
+    /* =====================================================
+       DON'T LET RANDOM TEXT BECOME PRODUCT
+       WHILE ADDRESS BUTTONS ARE WAITING
+    ===================================================== */
+
+    if (
+        session.status ===
+        STATES.AWAITING_ADDRESS_CHOICE
+    ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+
+            "📍 Please choose *Previous Address* or *Current Address* using the buttons above."
         );
 
         return;
@@ -6364,6 +6539,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This payment button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6381,7 +6557,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       BACK TO CART
+       BACK CART
     ===================================================== */
 
     if (
@@ -6393,15 +6569,15 @@ async function handleMessage(
             ![
                 STATES.AWAITING_EDIT,
                 STATES.AWAITING_EDIT_DETAILS
-            ]
-                .includes(
-                    session.status
-                )
+            ].includes(
+                session.status
+            )
         ) {
 
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6421,29 +6597,28 @@ async function handleMessage(
     }
 
     /* =====================================================
-       EDIT QUANTITY BUTTON
+       EDIT QUANTITY
     ===================================================== */
 
     if (
-        buttonId
-            ?.startsWith(
-                "EDIT_QTY_"
-            )
+        buttonId?.startsWith(
+            "EDIT_QTY_"
+        )
     ) {
 
         if (
             ![
                 STATES.AWAITING_EDIT,
                 STATES.AWAITING_EDIT_DETAILS
-            ]
-                .includes(
-                    session.status
-                )
+            ].includes(
+                session.status
+            )
         ) {
 
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6459,20 +6634,20 @@ async function handleMessage(
             );
 
         const item =
-            session.cart
-                .find(
-                    x =>
-                        Number(
-                            x.cartId
-                        ) ===
-                        itemNo
-                );
+            session.cart.find(
+                x =>
+                    Number(
+                        x.cartId
+                    ) ===
+                    itemNo
+            );
 
         if (!item) {
 
             await sendText(
                 phoneNumberId,
                 from,
+
                 "❌ Product is no longer in the cart."
             );
 
@@ -6488,6 +6663,7 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             `✏️ *${item.product_name}*\n` +
 
             `Current: ${formatQty(item.qty)} ${item.unit}\n\n` +
@@ -6501,29 +6677,28 @@ async function handleMessage(
     }
 
     /* =====================================================
-       REMOVE ITEM
+       REMOVE PRODUCT
     ===================================================== */
 
     if (
-        buttonId
-            ?.startsWith(
-                "REMOVE_ITEM_"
-            )
+        buttonId?.startsWith(
+            "REMOVE_ITEM_"
+        )
     ) {
 
         if (
             ![
                 STATES.AWAITING_EDIT,
                 STATES.AWAITING_EDIT_DETAILS
-            ]
-                .includes(
-                    session.status
-                )
+            ].includes(
+                session.status
+            )
         ) {
 
             await sendText(
                 phoneNumberId,
                 from,
+
                 "This button is no longer active. Type *Chacha* to start again."
             );
 
@@ -6551,6 +6726,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `❌ ${result.error}`
             );
 
@@ -6570,7 +6746,9 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `🗑️ ${result.removed.product_name} removed.\n\n` +
+
                 `🛒 Your cart is now empty.`
             );
 
@@ -6581,6 +6759,7 @@ async function handleMessage(
             phoneNumberId,
             from,
             session,
+
             `🗑️ Removed: ${result.removed.product_name}`
         );
 
@@ -6588,17 +6767,28 @@ async function handleMessage(
     }
 
     /* =====================================================
-       EMPTY / UNSUPPORTED MESSAGE
+       EMPTY / MEDIA
     ===================================================== */
 
     if (
         !text &&
+
         !(
             session.status ===
             STATES.AWAITING_ADDRESS &&
+
             location
         )
     ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+
+            "Please type the product name and quantity.\n" +
+
+            "Example: *Atta 2 Kg*"
+        );
 
         return;
     }
@@ -6617,10 +6807,9 @@ async function handleMessage(
             "cancel",
             "reset",
             "clear cart"
-        ]
-            .includes(
-                normalized
-            )
+        ].includes(
+            normalized
+        )
     ) {
 
         resetConversation(
@@ -6631,7 +6820,9 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "🗑️ Your current order has been cancelled.\n\n" +
+
             "Type *Chacha* to start again."
         );
 
@@ -6647,10 +6838,9 @@ async function handleMessage(
             "cart",
             "view cart",
             "my cart"
-        ]
-            .includes(
-                normalized
-            )
+        ].includes(
+            normalized
+        )
     ) {
 
         cleanInvalidCartItems(
@@ -6664,6 +6854,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "🛒 Your cart is empty."
             );
 
@@ -6673,6 +6864,7 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             buildBill(
                 session.cart,
                 "Your Cart"
@@ -6740,18 +6932,17 @@ async function handleMessage(
 
                 const address =
                     String(
-                        text ||
-                        ""
+                        text || ""
                     ).trim();
 
                 if (
-                    address.length <
-                    5
+                    address.length < 5
                 ) {
 
                     await sendText(
                         phoneNumberId,
                         from,
+
                         "📍 Please send a valid complete delivery address, or share your WhatsApp location pin."
                     );
 
@@ -6773,7 +6964,7 @@ async function handleMessage(
                 !distance.withinRange
             ) {
 
-                let message =
+                let msg =
                     `🚫 *This address is outside the delivery area.*\n\n` +
 
                     `📏 Distance from store: *${distance.distanceKm.toFixed(2)} km*`;
@@ -6782,17 +6973,17 @@ async function handleMessage(
                     distance.maxDistanceKm != null
                 ) {
 
-                    message +=
+                    msg +=
                         `\n🚚 Delivery limit: *${distance.maxDistanceKm.toFixed(2)} km*`;
                 }
 
-                message +=
+                msg +=
                     "\n\nPlease send another current address within the delivery area.";
 
                 await sendText(
                     phoneNumberId,
                     from,
-                    message
+                    msg
                 );
 
                 return;
@@ -6825,8 +7016,11 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `✅ Current address saved successfully.\n` +
+
                 `📍 ${saved.address}\n` +
+
                 `📏 Distance from store: *${distance.distanceKm.toFixed(2)} km*`
             );
 
@@ -6849,6 +7043,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `❌ Could not verify this address.\n\n` +
 
                 `${error.message}\n\n` +
@@ -6875,20 +7070,20 @@ async function handleMessage(
             );
 
         const item =
-            session.cart
-                .find(
-                    x =>
-                        Number(
-                            x.cartId
-                        ) ===
-                        itemNo
-                );
+            session.cart.find(
+                x =>
+                    Number(
+                        x.cartId
+                    ) ===
+                    itemNo
+            );
 
         if (!item) {
 
             await sendText(
                 phoneNumberId,
                 from,
+
                 "❌ Please enter a valid item number. Example: *1*"
             );
 
@@ -6911,13 +7106,15 @@ async function handleMessage(
     }
 
     /* =====================================================
-       EDIT QUANTITY TEXT
+       EDIT DETAILS
     ===================================================== */
 
     if (
         session.status ===
         STATES.AWAITING_EDIT_DETAILS
     ) {
+
+        await ensureCurrentCatalogLoaded();
 
         const match =
             normalized.match(
@@ -6932,6 +7129,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 "❌ Send the new quantity like *2 kg*, *500 g* or *3 pcs*."
             );
 
@@ -6956,6 +7154,7 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `❌ ${result.error}`
             );
 
@@ -6972,6 +7171,7 @@ async function handleMessage(
             phoneNumberId,
             from,
             session,
+
             `✅ Item ${itemNo} updated successfully.`
         );
 
@@ -6979,7 +7179,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       FINAL STATE
+       FINAL / PROCESSING
     ===================================================== */
 
     if (
@@ -6990,6 +7190,7 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "Please tap *Pay Now* above to continue."
         );
 
@@ -7004,30 +7205,59 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "Your order is being processed."
         );
 
         return;
     }
 
-    /* =====================================================
-       BLOCK LINKS FROM PRODUCT MATCHING
-    ===================================================== */
-
     if (
-        /^(?:https?:\/\/|www\.)/i
-            .test(
-                String(
-                    text
-                ).trim()
-            )
+        ![
+            STATES.IDLE,
+            STATES.AWAITING_MORE,
+            STATES.PREORDER
+        ].includes(
+            session.status
+        )
     ) {
 
         await sendText(
             phoneNumberId,
             from,
+
+            "Please use the available option above, or type *Chacha* to start a new order."
+        );
+
+        return;
+    }
+
+    /* =====================================================
+       ONLY NOW LOAD 28K PRODUCTS
+    ===================================================== */
+
+    await ensureCurrentCatalogLoaded();
+
+    /* =====================================================
+       BLOCK LINKS
+    ===================================================== */
+
+    if (
+        /(?:https?:\/\/|www\.)/i.test(
+            String(
+                text
+            ).trim()
+        )
+    ) {
+
+        await sendText(
+            phoneNumberId,
+            from,
+
             "❌ A link cannot be added as a product.\n\n" +
+
             "Please type the product name and quantity.\n" +
+
             "Example: *Atta 2 Kg*"
         );
 
@@ -7035,7 +7265,7 @@ async function handleMessage(
     }
 
     /* =====================================================
-       ADD PRODUCT
+       PRODUCT PARSING
     ===================================================== */
 
     const parsed =
@@ -7044,30 +7274,28 @@ async function handleMessage(
         );
 
     const validItems =
-        parsed
-            .filter(
-                item =>
-                    !item.error &&
-                    isValidCartItem(
-                        item
-                    )
-            );
+        parsed.filter(
+            item =>
+                !item.error &&
+                isValidCartItem(
+                    item
+                )
+        );
 
     const invalidItems =
-        parsed
-            .filter(
-                item =>
-                    item.error ||
-                    !isValidCartItem(
-                        item
-                    )
-            );
+        parsed.filter(
+            item =>
+                item.error ||
+                !isValidCartItem(
+                    item
+                )
+        );
 
     if (
         !validItems.length
     ) {
 
-        let message =
+        let msg =
             "❌ Product not found.";
 
         if (
@@ -7088,18 +7316,18 @@ async function handleMessage(
                 reasons.length
             ) {
 
-                message +=
+                msg +=
                     `\n\n${reasons.join("\n")}`;
             }
         }
 
-        message +=
+        msg +=
             "\n\nExample:\n*Atta 2 Kg*";
 
         await sendText(
             phoneNumberId,
             from,
-            message
+            msg
         );
 
         return;
@@ -7121,6 +7349,7 @@ async function handleMessage(
         await sendText(
             phoneNumberId,
             from,
+
             "❌ No valid product was added."
         );
 
@@ -7148,15 +7377,14 @@ async function handleMessage(
             await sendText(
                 phoneNumberId,
                 from,
+
                 `⚠️ Some items were not added:\n\n${
                     reasons
                         .map(
                             x =>
                                 `• ${x}`
                         )
-                        .join(
-                            "\n"
-                        )
+                        .join("\n")
                 }`
             );
         }
@@ -7172,6 +7400,7 @@ async function handleMessage(
         phoneNumberId,
         from,
         session,
+
         cartOperationNote(
             operation
         )
@@ -7201,10 +7430,9 @@ app.post(
                     "Invalid Meta webhook signature"
                 );
 
-                return res
-                    .sendStatus(
-                        403
-                    );
+                return res.sendStatus(
+                    403
+                );
             }
 
             const body =
@@ -7216,32 +7444,27 @@ app.post(
                 "whatsapp_business_account"
             ) {
 
-                return res
-                    .sendStatus(
-                        200
-                    );
+                return res.sendStatus(
+                    200
+                );
             }
 
             for (
                 const entry
-                of body.entry ||
-                []
+                of body.entry || []
             ) {
 
                 for (
                     const change
-                    of entry.changes ||
-                    []
+                    of entry.changes || []
                 ) {
 
                     const value =
-                        change.value ||
-                        {};
+                        change.value || {};
 
                     for (
                         const status
-                        of value.statuses ||
-                        []
+                        of value.statuses || []
                     ) {
 
                         try {
@@ -7263,13 +7486,11 @@ app.post(
                     }
 
                     const messages =
-                        value.messages ||
-                        [];
+                        value.messages || [];
 
                     if (
                         !messages.length
                     ) {
-
                         continue;
                     }
 
@@ -7316,6 +7537,7 @@ app.post(
 
                             if (
                                 message?.id &&
+
                                 await isMessageAlreadySaved(
                                     message.id
                                 )
@@ -7347,17 +7569,23 @@ app.post(
                     if (
                         !unseenMessages.length
                     ) {
-
                         continue;
                     }
 
+                    /*
+                     * LIGHTWEIGHT CONTEXT:
+                     * Product catalog is NOT loaded
+                     * just for Hi / random text / Chacha.
+                     */
+
                     const context =
-                        await loadMerchantCatalog(
+                        createLightweightMerchantContext(
                             channel
                         );
 
                     await merchantContext.run(
                         context,
+
                         async () => {
 
                             for (
@@ -7379,8 +7607,7 @@ app.post(
 
                                     console.error(
                                         "Message processing error:",
-                                        error.response
-                                            ?.data ||
+                                        error.response?.data ||
                                         error.message ||
                                         error
                                     );
@@ -7391,10 +7618,9 @@ app.post(
                 }
             }
 
-            return res
-                .sendStatus(
-                    200
-                );
+            return res.sendStatus(
+                200
+            );
         }
 
         catch (
@@ -7403,16 +7629,19 @@ app.post(
 
             console.error(
                 "Webhook error:",
-                error.response
-                    ?.data ||
+                error.response?.data ||
                 error.message ||
                 error
             );
 
-            return res
-                .sendStatus(
-                    200
-                );
+            /*
+             * Return 200 so Meta does not
+             * endlessly retry a bad payload.
+             */
+
+            return res.sendStatus(
+                200
+            );
         }
     }
 );
@@ -7469,12 +7698,43 @@ app.get(
 );
 
 /* =========================================================
-   START
+   START SERVER
 ========================================================= */
 
 async function start() {
 
     try {
+
+        const missingRequiredEnv =
+            [];
+
+        if (
+            !process.env.DB_USER
+        ) {
+
+            missingRequiredEnv.push(
+                "DB_USER"
+            );
+        }
+
+        if (
+            !process.env.DB_NAME
+        ) {
+
+            missingRequiredEnv.push(
+                "DB_NAME"
+            );
+        }
+
+        if (
+            missingRequiredEnv.length
+        ) {
+
+            throw new Error(
+                `Missing required .env variable(s): ${missingRequiredEnv.join(", ")}. ` +
+                `Expected .env beside index.js at ${path.join(__dirname, ".env")}`
+            );
+        }
 
         await query(
             "SELECT 1"
@@ -7482,6 +7742,10 @@ async function start() {
 
         console.log(
             "✅ Database connected"
+        );
+
+        console.log(
+            `🗄️ Database: ${process.env.DB_USER}@${process.env.DB_HOST || "127.0.0.1"}/${process.env.DB_NAME}`
         );
 
         if (!TOKEN) {
@@ -7523,7 +7787,7 @@ async function start() {
                 );
 
                 console.log(
-                    "🤖 Welcome command: Chacha / chacha ONLY"
+                    "🤖 Strict welcome gate: Chacha / chacha ONLY"
                 );
 
                 console.log(
