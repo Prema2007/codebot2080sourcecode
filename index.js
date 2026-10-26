@@ -4667,9 +4667,9 @@ function welcomeMessage(
 
         `*The Street Smart Operating System*\n` +
 
-        `*Powered By CODE-Bot 2080*\n` +
+        `Powered By *CODE-Bot 2080*\n` +
 
-        `*A Product of 2080 Technologies Private Limited*`
+        `A Product of *2080 Technologies Private Limited*`
     );
 }
 
