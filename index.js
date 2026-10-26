@@ -4657,13 +4657,13 @@ function welcomeMessage(
 
         `📥 *How to Order*\n` +
 
-        `• Type: *<Product Name> <Quantity Unit>*\n` +
+        `• Just Start Typing : *<Product Name> <Quantity Unit>*\n` +
 
-        `• Example: *Whole Wheat Atta 5 Kg*\n\n` +
+        `• Example: *Whole Wheat Atta 5 Kgs, Milk 1pkt*\n\n` +
 
         `• You can also type just the product name or items separated by a comma.\n\n` +
 
-        `*Units*: kg, g, pcs, ml, ltr, pkt\n\n` +
+        `*Units*: kg, kgs, g, pcs, pc, ml, ltr, pkt\n\n` +
 
         `*The Street Smart Operating System*\n` +
 
