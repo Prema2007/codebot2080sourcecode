@@ -5357,9 +5357,9 @@ function welcomeMessage(
 
         `📥 *How to Order*\n` +
 
-        `• Type: *<Product Name> <Quantity Unit>*\n` +
+        `• Just Start Typing: *<Product Name> <Quantity Unit>*\n` +
 
-        `• Example: *Whole Wheat Atta 5 Kg*\n\n` +
+        `• Example: *Whole Wheat Atta 5 Kg*, *Milk 1ltr*\n\n` +
 
         `• You can also type just the product name or items separated by a comma.\n\n` +
 
@@ -5367,9 +5367,9 @@ function welcomeMessage(
 
         `*The Street Smart Operating System*\n` +
 
-        `*Powered By CODE-Bot 2080*\n` +
+        `Powered By *CODE-Bot 2080*\n` +
 
-        `*A Product of 2080 Technologies Private Limited*`
+        `A Product of *2080 Technologies Private Limited*`
     );
 }
 
